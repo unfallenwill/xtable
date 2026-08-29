@@ -1,22 +1,27 @@
-//! 对抗性可靠性审计 PoC（reliability attack proofs of concept）。
+//! Regression tests for the vulnerabilities documented in `xtable-tx/RELIABILITY_ATTACK.md`.
 //!
-//! ⚠️ 审计环境没有 Rust 工具链，本文件**未被执行**，仅静态编写。
-//!    所有断言都针对"当前实现的真实行为"编写：测试通过 = 漏洞复现成功。
-//!    修复对应漏洞后，断言方向应反转（文件内每处均有注释说明正确预期）。
+//! Each `pocN_*` test asserts the **correct** invariant the system must satisfy
+//! once the corresponding finding is fixed. The test panics if the bug is
+//! still present (see each `assert!` message for the original V-number).
 //!
-//! 每个测试对应 RELIABILITY_ATTACK.md 中的一个编号发现：
-//!   poc1 → V4  事务 vs 事务的 OCC 冲突检测完全失效（lost update 静默发生）
-//!   poc2 → V2  崩溃窗口（链已发布、WAL 未写 Committed）→ 恢复流程删掉已发布数据
-//!   poc3 → V1  冷重建把所有事务写入对象判为孤儿并全部删除（"灾难恢复"= 全量灭数据）
-//!   poc4 → V3  上传失败补偿 delete 会摧毁该 key 上"之前已提交"的数据
-//!   poc5 → V9  共享快照 pin 被先提交者拔掉 → 活跃事务读已提交数据返回"不存在"
-//!   poc6 → V10 事务内 Delete 不是删除：commit 时把 0 字节对象 Put 上后端
-//!   poc7 → V18 HTTP 层 stage 传 current_global_version 作为 threshold，
-//!              从第二笔事务起所有事务写入被 400 拒绝（测试全部传 0 绕过了此检查）
+//! Mapping (finding → test):
+//!   poc1 → V4   OCC must reject write-write conflicts between concurrent txns
+//!   poc2 → V2   Recovery must complete a commit whose WAL stalled at
+//!               "Committing" — never delete the already-published object
+//!   poc3 → V1   Cold rebuild must not classify committed backend objects
+//!               as orphans and wipe them
+//!   poc4 → V3   A failed commit must not destroy prior committed data on
+//!               shared keys
+//!   poc5 → V9   Snapshot pins must be reference-counted so GC cannot steal
+//!               a pin still held by an in-flight txn
+//!   poc6 → V10  Transactional delete must remove the backend object and
+//!               leave a tombstone in the version chain
+//!   poc7 → V18  HTTP-stage threshold must not reject every transaction
+//!               after the first commit advances the global version
 //!
-//! 注意：除 poc7 外，所有 stage 调用 threshold 一律传 0——这正是现有
-//! integration_e2e.rs 的做法（它因此绕过了 HTTP 层的真实参数），这里的目的是
-//! 走到更深的提交/恢复/重建路径去复现那些漏洞。
+//! These tests use the real coordinator / recovery / rebuild paths with a
+//! fault-injecting mock backend. They are the e2e companion to the
+//! unit-level regression tests in `xtable-tx/tests/regression_vulns.rs`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -72,7 +77,7 @@ async fn attack_s3_server() -> (String, AttackMock) {
         method: Method,
         uri: Uri,
         headers: axum::http::HeaderMap,
-        Query(params): Query<HashMap<String, String>>,
+        Query(_params): Query<HashMap<String, String>>,
         body: axum::body::Bytes,
     ) -> Response {
         let path = uri.path().to_string();
@@ -113,7 +118,16 @@ async fn attack_s3_server() -> (String, AttackMock) {
         match method.as_str() {
             "PUT" => {
                 let fail = s.fail_put_prefix.lock().unwrap().clone();
-                if !fail.is_empty() && key.starts_with(&fail) {
+                // The coordinator stages uploads at
+                // `xtable-txn-staging/{txn_id}/{key}` so a failed-PUT
+                // injection keyed on the user-visible key prefix still
+                // fires. We strip a recognized staging prefix before the
+                // prefix check.
+                let logical_key = key
+                    .strip_prefix("xtable-txn-staging/")
+                    .and_then(|s| s.split_once('/').map(|(_, k)| k))
+                    .unwrap_or(&key);
+                if !fail.is_empty() && logical_key.starts_with(&fail) {
                     return (StatusCode::SERVICE_UNAVAILABLE, "injected failure").into_response();
                 }
                 s.objects.lock().unwrap().insert(key.clone(), body.to_vec());
@@ -199,7 +213,7 @@ async fn stage(coord: &TxnCoordinator, txn: &str, key: &str, body: &[u8]) {
 }
 
 // =========================================================================
-// PoC 1 — OCC 在"事务 vs 事务"场景下永远不冲突（V4）
+// Regression: V4 — OCC must detect write-write conflicts
 // =========================================================================
 
 #[tokio::test]
@@ -213,26 +227,28 @@ async fn poc1_occ_never_conflicts_between_two_txns() {
 
     coord.commit(&t1).await.unwrap();
 
-    // 正确行为（README "Lost-update protection"、MVCC_RELIABILITY I5）：
-    // 第二个提交必须返回 409 Conflict。
-    // 实际行为：Ok —— 因为 OCC 校验读的 TBL_VERSIONS 表在事务提交路径上
-    // 从不更新（coordinator 只写 TBL_VERSION_CHAINS），双方 version_at_read
-    // 恒为 0，校验恒通过。
+    // The second commit must return a conflict (lost-update protection,
+    // per README and MVCC_RELIABILITY I5). Before the fix it returned Ok
+    // because TBL_VERSIONS was never updated on commit, so version_at_read
+    // was always 0 and the check always passed.
     let second = coord.commit(&t2).await;
-    assert!(second.is_ok(), "V4 复现：两个并发写者都赢了，无任何冲突上报");
+    assert!(second.is_err(),
+        "V4: OCC did not detect write-write conflict on the same key");
 
-    // 根因证据：OCC 校验所依据的版本表里，这个 key 根本不存在。
-    assert!(store.get_version(&ObjectKey::new("k")).unwrap().is_none(),
-        "V4 复现：TBL_VERSIONS 从未被事务提交更新，OCC 校验建立在空表上");
+    // TBL_VERSIONS must reflect the committed version after t1 commits.
+    assert!(store.get_version(&ObjectKey::new("k")).unwrap().is_some(),
+        "V4: TBL_VERSIONS was not updated on commit — OCC check has no ground truth");
 
-    // 后果：t1 已提交的 "A" 被 t2 静默覆盖（lost update），两个客户端都收到成功。
-    assert_eq!(mock.get("k").unwrap(), b"B");
+    // t1's value must be preserved; t2's write must not reach the backend.
+    assert_eq!(mock.get("k").unwrap(), b"A",
+        "V4: lost update — t2 silently overwrote t1's commit");
     let chain = store.read_chain("k").unwrap();
-    assert_eq!(chain.entries.len(), 2, "两个写者都成了赢家，同时进入版本链");
+    assert_eq!(chain.entries.len(), 1,
+        "V4: only t1's write should be in the version chain (t2 rejected)");
 }
 
 // =========================================================================
-// PoC 2 — 崩溃在"链已发布、WAL 未写 Committed"窗口 → 恢复删除已发布数据（V2）
+// Regression: V2 — Recovery must complete a commit whose WAL stalled
 // =========================================================================
 
 #[tokio::test]
@@ -242,8 +258,10 @@ async fn poc2_recovery_deletes_published_commit() {
     let txn = coord.begin(None).await.unwrap();
     stage(&coord, &txn, "k", b"payload").await;
 
-    // 手工构造 coordinator.rs 执行到第 306 行（append_chain_entries_bulk 已落盘）
-    // 之后、第 311 行（WAL Committed）之前的崩溃现场。
+    // Reconstruct the crash window between
+    // append_chain_entries_bulk (line ~306) and WAL Committed (line ~311):
+    // chain entry + backend object are already published, only the WAL
+    // Committed record is missing.
     store.append_wal(&WalRecord::ValidateOk {
         txn_id: txn.clone(),
         write_keys: vec!["k".into()],
@@ -260,31 +278,30 @@ async fn poc2_recovery_deletes_published_commit() {
     store.append_chain_entry("k", &VersionEntry::new(1, "e1".into(), "k".into(), txn.clone(), 7)).unwrap();
     backend.put_object(&ObjectKey::new("k"), b"payload".to_vec(), None, HashMap::new()).await.unwrap();
 
-    // 崩溃后重启：恢复流程看到最后一条 WAL 是 Committing → 补偿删除。
     recovery::recover(&store, &*backend).await.unwrap();
 
-    // 正确行为：版本链已发布（原子性点已过），恢复应将其补成 Committed。
-    // 实际行为：把后端对象删了。
-    assert!(!mock.contains("k"),
-        "V2 复现：恢复流程把已发布的对象从后端删除了");
-    // 而版本链（和读者可见性依据）仍声称该数据存在 → 悬挂索引。
+    // The chain entry is already published (atomicity point crossed), so
+    // recovery must complete the commit: keep the backend object, keep the
+    // chain entry, and mark the txn Committed.
+    assert!(mock.contains("k"),
+        "V2: recovery deleted a backend object whose chain entry was already published");
     let chain = store.read_chain("k").unwrap();
     assert_eq!(chain.entries.len(), 1,
-        "V2 复现：版本链仍保留已被删除数据的条目（索引悬挂）");
+        "V2: chain entry was lost during recovery");
     let post = store.get_txn_state(&txn).unwrap().unwrap();
-    assert_eq!(post.status, TxnStatus::Aborted,
-        "V2 复现：同一笔数据'链上已发布'与'状态为 Aborted'并存，I2/I7 被破坏");
+    assert_eq!(post.status, TxnStatus::Committed,
+        "V2: recovered commit left txn in Aborted state (I2/I7 broken)");
 }
 
 // =========================================================================
-// PoC 3 — 冷重建把所有事务写入对象当孤儿删光（V1）
+// Regression: V1 — Cold rebuild must preserve committed backend objects
 // =========================================================================
 
 #[tokio::test]
 async fn poc3_cold_rebuild_annihilates_txn_objects() {
     let (coord, _store, backend, mock, _tmp) = setup().await;
 
-    // 通过真实提交路径写入三笔已提交数据。
+    // Commit three objects via the real path.
     for k in ["a", "b", "c"] {
         let t = coord.begin(None).await.unwrap();
         stage(&coord, &t, k, format!("value-{}", k).as_bytes()).await;
@@ -292,58 +309,60 @@ async fn poc3_cold_rebuild_annihilates_txn_objects() {
     }
     assert_eq!(mock.keys().len(), 3);
 
-    // 灾难场景：redb 目录被删（README: "No data lost"）。服务器以空库启动
-    // （main.rs:79 条件成立）→ 冷重建。
+    // Disaster scenario: redb directory gone, server boots with empty store
+    // and runs cold rebuild.
     let tmp2 = tempfile::TempDir::new().unwrap();
     let fresh = LocalStore::open_path(&tmp2.path().join("xt.redb")).unwrap();
     let report = rebuild::rebuild(&fresh, &*backend).await.unwrap();
 
-    // 正确行为：三笔都已提交（后端对象携带 txn 元数据，但本地 TxnState 已随
-    // redb 丢失）→ 至少不应删除。实际行为：txn_is_committed 对空库恒为 false
-    // → 全部判为孤儿 → 全部删除。
-    assert!(report.orphans_deleted >= 3,
-        "V1 复现：冷重建把 {} 个已提交对象判为孤儿", report.orphans_deleted);
-    assert!(mock.keys().is_empty(),
-        "V1 复现：README 声称'不丢数据'的灾难恢复把桶清空了");
-    // 重建后的索引（旧表）也没有任何可用条目；MVCC 链更是从未被重建填充。
-    assert!(fresh.read_chain("a").unwrap().entries.is_empty());
+    // All three objects are committed; they must not be classified as
+    // orphans just because the local TxnState was lost with the redb.
+    assert_eq!(report.orphans_deleted, 0,
+        "V1: cold rebuild wrongly classified committed objects as orphans ({})",
+        report.orphans_deleted);
+    assert_eq!(mock.keys().len(), 3,
+        "V1: cold rebuild deleted committed objects (data loss)");
+    // The MVCC chain must be rebuilt from backend state, not left empty.
+    assert!(!fresh.read_chain("a").unwrap().entries.is_empty(),
+        "V1: cold rebuild left MVCC chain empty for a committed object");
 }
 
 // =========================================================================
-// PoC 4 — 上传失败的补偿 delete 摧毁该 key 上"之前已提交"的数据（V3）
+// Regression: V3 — A failed commit must not destroy prior committed data
 // =========================================================================
 
 #[tokio::test]
 async fn poc4_failed_commit_destroys_prior_committed_object() {
     let (coord, store, _backend, mock, _tmp) = setup().await;
 
-    // T0：提交 k = "old"（正常已提交数据）。
+    // T0: commit k = "old".
     let t0 = coord.begin(None).await.unwrap();
     stage(&coord, &t0, "k", b"old").await;
     coord.commit(&t0).await.unwrap();
     assert_eq!(mock.get("k").unwrap(), b"old");
 
-    // T1：重写 k，同时写一个会被注入故障的 key。
+    // T1: rewrite k plus a key that the mock will fail to PUT.
     mock.set_fail_put_prefix("poison/");
     let t1 = coord.begin(None).await.unwrap();
     stage(&coord, &t1, "k", b"new").await;
     stage(&coord, &t1, "poison/x", b"z").await;
 
     let r = coord.commit(&t1).await;
-    assert!(r.is_err(), "上传失败，T1 整体回滚——这部分是对的");
+    assert!(r.is_err(), "T1 must roll back atomically on upload failure");
 
-    // 正确行为：T1 回滚后，k 应回到 T0 提交的 "old"。
-    // 实际行为：k 的上传成功 → 覆盖了 "old" → 补偿路径对裸 key 执行
-    // DeleteObject → "old" 彻底消失。后端无版本化，覆盖+删除=不可恢复。
-    assert!(!mock.contains("k"),
-        "V3 复现：一笔无关上传失败，把之前已提交的数据从后端抹掉了");
-    // 而版本链仍留着 T0 的条目 → 索引指向已不存在的数据。
+    // After T1 rolls back, k must still hold T0's "old" — the compensation
+    // path must not run a bare DeleteObject on a key that already had a
+    // committed version.
+    assert_eq!(mock.get("k").unwrap(), b"old",
+        "V3: failed-compensation delete destroyed prior committed data");
+    // The chain entry from T0 must still be there.
     let chain = store.read_chain("k").unwrap();
-    assert_eq!(chain.entries.len(), 1);
+    assert_eq!(chain.entries.len(), 1,
+        "V3: T0 chain entry missing after T1 rollback");
 }
 
 // =========================================================================
-// PoC 5 — 共享快照 pin 被先提交者拔掉 → 活跃事务遭遇幻影删除（V9）
+// Regression: V9 — Active snapshots must survive concurrent unregister
 // =========================================================================
 
 #[tokio::test]
@@ -354,27 +373,28 @@ async fn poc5_shared_snapshot_pin_stolen_by_first_committer() {
     store.append_chain_entry("k", &VersionEntry::new(1, "e1".into(), "k".into(), "T1".into(), 1)).unwrap();
     store.append_chain_entry("k", &VersionEntry::new(6, "e6".into(), "k".into(), "T6".into(), 1)).unwrap();
 
-    // 两个事务在同一 global_version=1 开启（常态：版本只在提交时前进）。
-    // register_snapshot 是按版本号 insert，无引用计数 → 第二次注册是空操作。
+    // Two txns both pin snapshot 1. register_snapshot must be reference-
+    // counted; otherwise the first commit's unregister will steal the pin
+    // still held by the second txn.
     store.register_snapshot(1).unwrap();
     store.register_snapshot(1).unwrap();
 
-    // 第一个事务提交 → unregister 把共享 pin 拔掉，第二个事务仍在运行。
+    // First txn commits and unregisters — the pin must NOT be removed yet.
     store.unregister_snapshot(1).unwrap();
 
-    // GC 认为已无活跃快照 → 剪掉旧版本。
+    // GC must not run yet (one pin remains).
     gc::gc_version_chains(&store).unwrap();
 
-    // 正确行为（MVCC_RELIABILITY I3/I8）：仍在运行的第二个事务在快照 1 上
-    // 应读到 v1。实际行为：v1 已被剪掉 → 返回 None → 该 key 对活跃事务
-    // "从未存在过"。
+    // The still-running second txn must see v1 at snapshot 1 (I3/I8).
     let r = store.read_at_snapshot("k", 1).unwrap();
-    assert!(r.is_none(),
-        "V9 复现：活跃快照读返回 None——事务开始时明明存在的数据被 GC 幻影删除");
+    assert!(r.is_some(),
+        "V9: active snapshot lost data to GC (phantom delete) — pin not refcounted");
+    assert_eq!(r.unwrap().commit_version, 1,
+        "V9: read_at_snapshot returned the wrong version after GC");
 }
 
 // =========================================================================
-// PoC 6 — 事务内 Delete 不是删除：commit 时写入 0 字节对象（V10）
+// Regression: V10 — Transactional delete must remove the backend object
 // =========================================================================
 
 #[tokio::test]
@@ -385,7 +405,7 @@ async fn poc6_transactional_delete_writes_empty_object() {
     stage(&coord, &t0, "k", b"real-data").await;
     coord.commit(&t0).await.unwrap();
 
-    // service.rs 的 delete_object 事务路径：stage 空 body（service.rs:272-289）。
+    // Transactional delete via service.rs (stage with empty body, deleted=true).
     let t1 = coord.begin(None).await.unwrap();
     coord
         .stage(&t1, &ObjectKey::new("k"), Vec::new(), None, HashMap::new(), true)
@@ -393,47 +413,48 @@ async fn poc6_transactional_delete_writes_empty_object() {
         .unwrap();
     coord.commit(&t1).await.unwrap();
 
-    // 正确行为：对象应被删除，链上留下 tombstone（deleted=true）。
-    // 实际行为：commit 把空 body 当普通 PutObject 上传 → 对象还在，内容为空；
-    // 链上条目 deleted=false（VersionEntry::tombstone 从未被 commit 使用）。
-    let body = mock.get("k")
-        .expect("V10 复现：事务删除后对象仍存在于后端");
-    assert!(body.is_empty(),
-        "V10 复现：'删除'的结果是一个 0 字节对象，而不是删除");
+    // The backend object must be gone (not replaced by a 0-byte PutObject),
+    // and the chain entry must carry a tombstone so reads at this version
+    // return None.
+    assert!(mock.get("k").is_none(),
+        "V10: transactional delete left the backend object in place");
     let last = store.read_chain("k").unwrap().entries.last().cloned().unwrap();
-    assert!(!last.deleted, "V10 复现：链上无 tombstone 标记");
+    assert!(last.deleted,
+        "V10: chain entry missing tombstone marker after transactional delete");
 }
 
 // =========================================================================
-// PoC 7 — HTTP 层 stage 的 threshold 传参使第二笔事务起全部被拒（V18）
+// Regression: V18 — HTTP-stage threshold must not reject subsequent txns
 // =========================================================================
 
 #[tokio::test]
 async fn poc7_http_layer_rejects_every_txn_after_the_first() {
     let (coord, store, _backend, mock, _tmp) = setup().await;
 
-    // 第一笔事务（global_version == 0）：threshold 检查恰好通过。
+    // First txn (global_version == 0): threshold check passes by accident.
     let t1 = coord.begin(None).await.unwrap();
-    let g1 = store.current_global_version().unwrap(); // = 0
+    let _g1 = store.current_global_version().unwrap(); // = 0
     coord
         .stage(&t1, &ObjectKey::new("k"), b"x".to_vec(), None, HashMap::new(), false)
         .await
         .unwrap();
     coord.commit(&t1).await.unwrap(); // global_version → 1
 
-    // 第二笔事务：service.rs:144 传 current_global_version() 作为 threshold。
-    // 由于事务提交从不写 TBL_VERSIONS，get_version(new key) 恒为 0 < 1 → 拒绝。
+    // Second txn: the HTTP layer passes current_global_version() as the
+    // threshold. If TBL_VERSIONS is never written on commit, get_version
+    // of any new key returns 0 < 1 → stage is rejected with InvalidArgument
+    // (HTTP 400). Every subsequent txn is dead in the water.
     let t2 = coord.begin(None).await.unwrap();
-    let g2 = store.current_global_version().unwrap(); // = 1
+    let _g2 = store.current_global_version().unwrap(); // = 1
     let r = coord
         .stage(&t2, &ObjectKey::new("fresh"), b"y".to_vec(), None, HashMap::new(), false)
         .await;
 
-    // 正确行为：stage 应成功。实际行为：Err(InvalidArgument) → HTTP 400。
-    // 现有 e2e 测试全部传 threshold=0，从未覆盖 HTTP 层的真实传参，
-    // 所以 63 个绿灯测不出这个问题。
-    assert!(r.is_err(),
-        "V18 复现：第二笔事务的 stage 被拒——HTTP 事务路径从第二笔起不可用");
-    assert!(mock.keys().iter().all(|k| k == "k"),
-        "只有第一笔事务真正到达过后端");
+    // The stage must succeed — and the write must reach the backend.
+    assert!(r.is_ok(),
+        "V18: HTTP-stage threshold rejected the second transaction");
+    // Commit t2 so the assertion below checks what actually shipped to backend.
+    coord.commit(&t2).await.unwrap();
+    assert!(mock.keys().contains(&"fresh".to_string()),
+        "V18: second transaction's stage succeeded but its write never reached backend");
 }
