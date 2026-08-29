@@ -1,8 +1,8 @@
-//! Regression tests for the vulnerabilities documented in `xtable-tx/RELIABILITY_ATTACK.md`.
+//! Regression tests for the MVCC reliability findings.
 //!
-//! Each `pocN_*` test asserts the **correct** invariant the system must satisfy
-//! once the corresponding finding is fixed. The test panics if the bug is
-//! still present (see each `assert!` message for the original V-number).
+//! Each `pocN_*` test asserts the **correct** invariant the system must
+//! satisfy. The test panics if the bug is still present (see each `assert!`
+//! message for the original V-number).
 //!
 //! Mapping (finding → test):
 //!   poc1 → V4   OCC must reject write-write conflicts between concurrent txns
@@ -227,10 +227,9 @@ async fn poc1_occ_never_conflicts_between_two_txns() {
 
     coord.commit(&t1).await.unwrap();
 
-    // The second commit must return a conflict (lost-update protection,
-    // per README and MVCC_RELIABILITY I5). Before the fix it returned Ok
-    // because TBL_VERSIONS was never updated on commit, so version_at_read
-    // was always 0 and the check always passed.
+    // The second commit must return a conflict (lost-update protection).
+    // Before the fix it returned Ok because TBL_VERSIONS was never updated
+    // on commit, so version_at_read was always 0 and the check always passed.
     let second = coord.commit(&t2).await;
     assert!(second.is_err(),
         "V4: OCC did not detect write-write conflict on the same key");

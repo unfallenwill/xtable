@@ -1,8 +1,7 @@
-//! MVCC reliability proof — property-based invariant tests.
+//! MVCC reliability — property-based invariant tests.
 //!
-//! See `MVCC_RELIABILITY.md` for the formal claim and reasoning behind each
-//! invariant. These tests **run the proof** — if any invariant fails, the
-//! MVCC design is unsound.
+//! Each `prop_iN_*` test asserts an MVCC invariant the storage layer must
+//! uphold. If any invariant fails, the MVCC design is unsound.
 //!
 //! Invariants covered:
 //! - I1 (chain strictly monotonic):  prop_i1_chain_monotonic

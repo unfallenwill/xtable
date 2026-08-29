@@ -2,9 +2,9 @@
 //!
 //! All routes are mounted under `/v1/spaces/:space/...`. Each write request
 //! runs in its own short-lived transaction so multi-record atomicity per
-//! request is guaranteed. For cross-request atomicity, use the explicit
-//! `/v1/structured/txn` endpoints (or compose with the lower-level
-//! `/?transactional=...` routes).
+//! request is guaranteed. For cross-request atomicity across multiple HTTP
+//! calls, use the explicit `/v1/structured/txn` endpoint to obtain a
+//! `txn_id` and pass it back through the structured-space APIs.
 //!
 //! Error responses are JSON: `{"error": "<msg>", "code": "<s3-style>"}`.
 

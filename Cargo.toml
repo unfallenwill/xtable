@@ -5,7 +5,6 @@ members = [
     "xtable-storage",
     "xtable-backend",
     "xtable-auth",
-    "xtable-s3",
     "xtable-tx",
     "xtable-schema",
     "xtable-server",
@@ -31,9 +30,6 @@ axum = { version = "0.7", features = ["macros", "tokio", "http1"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace", "timeout", "limit", "request-id", "util"] }
 hyper = { version = "1.4", features = ["full"] }
-
-# S3 protocol (server side)
-s3s = { version = "0.15" }
 
 # AWS SDK (backend client)
 aws-config = { version = "1.5", features = ["behavior-version-latest"] }

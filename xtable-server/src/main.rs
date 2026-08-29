@@ -4,11 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
-use axum::extract::State;
-use axum::http::{HeaderValue, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::post;
-use axum::Router;
 use clap::Parser;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -17,10 +13,6 @@ use tracing_subscriber::EnvFilter;
 use xtable_auth::StaticCredential;
 use xtable_backend::BackendClient;
 use xtable_core::config::Config;
-use xtable_core::headers::{
-    XTABLE_COMMIT_VERSION, XTABLE_CONFLICT_KEYS, XTABLE_SNAPSHOT_VERSION, XTABLE_TXN_ID,
-    XTABLE_TXN_STATUS,
-};
 use xtable_server::shutdown::wait_for_shutdown;
 use xtable_storage::LocalStore;
 
@@ -157,8 +149,8 @@ fn spawn_gc(state: xtable_server::app::AppState) {
 fn build_router(state: xtable_server::app::AppState) -> axum::Router {
     use axum::routing::get;
 
-    // V15 fix: SigV4 authentication middleware. All S3 + transactional
-    // routes pass through this layer. /healthz and /readyz are public.
+    // SigV4 authentication middleware. The structured-data-space routes under
+    // /v1 require authentication; /healthz and /readyz are public.
     let auth_layer = axum::middleware::from_fn_with_state(
         state.clone(),
         auth_middleware,
@@ -168,41 +160,19 @@ fn build_router(state: xtable_server::app::AppState) -> axum::Router {
         .route("/healthz", get(|| async { "ok\n" }))
         .route("/readyz", get(|| async { "ok\n" }));
 
-    // Transactional extension routes (Phase 2.3). axum matches on path
-    // only, not query string, so we register a single dispatcher at `/`
-    // that branches on `transactional=begin|commit|abort` (POST) and
-    // `transactional=status` (GET).
-    let txn_routes = Router::new()
-        .route("/", post(txn_dispatch).get(status_dispatch))
-        .with_state(state.clone());
-
-    // S3 routing — bypass s3s entirely (its second SigV4 verifier disagrees
-    // with xtable's hand-rolled verifier). Direct dispatch through our own
-    // router calls XtableS3Service methods straight from axum.
-    let s3_svc = std::sync::Arc::new(xtable_s3::service::XtableS3Service::new(
-        state.backend.clone(),
-        state.store.clone(),
-        state.txn.clone(),
-        state.auth.creds.clone(),
-    ));
-    let s3_direct = xtable_s3::direct_router::build_direct_router(state.auth.clone())
-        .with_state(xtable_s3::direct_router::DirectRouterState(s3_svc));
-
     // Structured-data-space routes under /v1.
     let state_arc = std::sync::Arc::new(state.clone());
     let structured_routes = xtable_server::structured::router().with_state(state_arc);
 
     axum::Router::new()
         .merge(admin)
-        .merge(txn_routes)
-        .merge(s3_direct)
         .merge(structured_routes)
         .with_state(state)
         .layer(auth_layer)
 }
 
-/// V15: SigV4 auth middleware. Rejects unauthenticated requests with 401
-/// before they reach the S3 / transactional handlers.
+/// SigV4 auth middleware. Rejects unauthenticated requests with 401 before
+/// they reach the structured-data-space handlers.
 async fn auth_middleware(
     axum::extract::State(state): axum::extract::State<xtable_server::app::AppState>,
     req: axum::http::Request<axum::body::Body>,
@@ -216,143 +186,4 @@ async fn auth_middleware(
                 format!("{}", e)).into_response();
     }
     next.run(req).await
-}
-
-
-// ----- Transactional routes -----
-
-async fn begin_txn(
-    State(state): State<xtable_server::app::AppState>,
-) -> impl IntoResponse {
-    match state.txn.begin(None).await {
-        Ok(txn_id) => {
-            let snapshot = state.store.current_global_version().unwrap_or(0);
-            let mut resp = (StatusCode::OK, "ok").into_response();
-            if let Ok(hv) = HeaderValue::from_str(&txn_id) {
-                resp.headers_mut().insert(XTABLE_TXN_ID, hv);
-            }
-            if let Ok(hv) = HeaderValue::from_str(&snapshot.to_string()) {
-                resp.headers_mut().insert(XTABLE_SNAPSHOT_VERSION, hv);
-            }
-            resp
-        }
-        Err(e) => error_to_response(e),
-    }
-}
-
-async fn commit_txn(
-    State(state): State<xtable_server::app::AppState>,
-    headers: axum::http::HeaderMap,
-) -> impl IntoResponse {
-    let txn_id = match headers.get(XTABLE_TXN_ID).and_then(|v| v.to_str().ok()) {
-        Some(s) => s.to_string(),
-        None => return error_to_response(xtable_core::XtableError::invalid("missing x-xtable-txn-id header")),
-    };
-    match state.txn.commit(&txn_id).await {
-        Ok(outcome) => {
-            let mut resp = (StatusCode::OK, "committed").into_response();
-            if let Ok(hv) = HeaderValue::from_str(&outcome.commit_version.to_string()) {
-                resp.headers_mut().insert(XTABLE_COMMIT_VERSION, hv);
-            }
-            resp
-        }
-        Err(e) => error_to_response(e),
-    }
-}
-
-async fn abort_txn(
-    State(state): State<xtable_server::app::AppState>,
-    headers: axum::http::HeaderMap,
-) -> impl IntoResponse {
-    let txn_id = match headers.get(XTABLE_TXN_ID).and_then(|v| v.to_str().ok()) {
-        Some(s) => s.to_string(),
-        None => return error_to_response(xtable_core::XtableError::invalid("missing x-xtable-txn-id header")),
-    };
-    match state.txn.abort(&txn_id).await {
-        Ok(()) => (StatusCode::NO_CONTENT, "").into_response(),
-        Err(e) => error_to_response(e),
-    }
-}
-
-async fn status_txn(
-    State(state): State<xtable_server::app::AppState>,
-    headers: axum::http::HeaderMap,
-) -> impl IntoResponse {
-    let txn_id = match headers.get(XTABLE_TXN_ID).and_then(|v| v.to_str().ok()) {
-        Some(s) => s.to_string(),
-        None => return error_to_response(xtable_core::XtableError::invalid("missing x-xtable-txn-id header")),
-    };
-    match state.txn.status(&txn_id).await {
-        Ok(s) => {
-            let mut resp = (StatusCode::OK, s.to_string()).into_response();
-            if let Ok(hv) = HeaderValue::from_str(s.as_str()) {
-                resp.headers_mut().insert(XTABLE_TXN_STATUS, hv);
-            }
-            resp
-        }
-        Err(e) => error_to_response(e),
-    }
-}
-
-fn error_to_response(e: xtable_core::XtableError) -> axum::response::Response {
-    let status = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let mut resp = (status, format!("{}", e)).into_response();
-    // 409 → include conflict keys header (placeholder; specific keys handled by CommitTxn upstream).
-    if status == StatusCode::CONFLICT {
-        if let Some(keys) = extract_conflict_keys(&e) {
-            if let Ok(hv) = HeaderValue::from_str(&keys) {
-                resp.headers_mut().insert(XTABLE_CONFLICT_KEYS, hv);
-            }
-        }
-    }
-    resp
-}
-
-/// Dispatch POST `/` on the `transactional` query parameter.
-async fn txn_dispatch(
-    State(state): State<xtable_server::app::AppState>,
-    headers: axum::http::HeaderMap,
-    query: axum::extract::RawQuery,
-) -> axum::response::Response {
-    let q = query.0.unwrap_or_default();
-    let op = q
-        .split('&')
-        .find_map(|kv| kv.strip_prefix("transactional="))
-        .unwrap_or("");
-    match op {
-        "begin" => begin_txn(State(state)).await.into_response(),
-        "commit" => commit_txn(State(state), headers).await.into_response(),
-        "abort" => abort_txn(State(state), headers).await.into_response(),
-        _ => error_to_response(xtable_core::XtableError::invalid(format!(
-            "unknown transactional op: {}",
-            op
-        ))),
-    }
-}
-
-/// Dispatch GET `/` on the `transactional` query parameter.
-async fn status_dispatch(
-    State(state): State<xtable_server::app::AppState>,
-    headers: axum::http::HeaderMap,
-    query: axum::extract::RawQuery,
-) -> axum::response::Response {
-    let q = query.0.unwrap_or_default();
-    let op = q
-        .split('&')
-        .find_map(|kv| kv.strip_prefix("transactional="))
-        .unwrap_or("");
-    match op {
-        "status" => status_txn(State(state), headers).await.into_response(),
-        _ => error_to_response(xtable_core::XtableError::invalid(format!(
-            "unknown transactional op (GET): {}",
-            op
-        ))),
-    }
-}
-
-fn extract_conflict_keys(e: &xtable_core::XtableError) -> Option<String> {
-    let s = format!("{}", e);
-    s.strip_prefix("conflict: ")
-        .map(|s| s.to_string())
-        .or_else(|| s.strip_prefix("aborted: ").map(|s| s.to_string()))
 }

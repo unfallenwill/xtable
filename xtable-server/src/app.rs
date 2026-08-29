@@ -6,7 +6,6 @@ use xtable_auth::{CredentialStore, EdgeAuth};
 use xtable_backend::BackendClient;
 use xtable_schema::StructuredSpace;
 use xtable_storage::LocalStore;
-use xtable_tx::TxnCoordinator;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -14,7 +13,6 @@ pub struct AppState {
     pub store: LocalStore,
     pub backend: Arc<BackendClient>,
     pub auth: Arc<EdgeAuth>,
-    pub txn: Arc<TxnCoordinator>,
     pub structured: Arc<StructuredSpace>,
 }
 
@@ -37,14 +35,18 @@ impl AppState {
             allow_anonymous_read: config.auth.allow_anonymous_read,
         });
         let backend_arc = Arc::new(backend);
-        let txn = Arc::new(TxnCoordinator::new(
+        // The structured-data-space layer owns the only transaction coordinator
+        // it talks to. We never expose it on `AppState` because no HTTP handler
+        // needs it directly — the structured routes always go through
+        // `state.structured.{begin,commit}_txn`.
+        let txn = Arc::new(xtable_tx::TxnCoordinator::new(
             Arc::new(store.clone()),
             Arc::clone(&backend_arc),
             config.storage.staged_body_spill_dir.clone(),
             config.txn.commit_upload_concurrency,
         ));
         let structured = Arc::new(StructuredSpace::new(
-            Arc::clone(&txn),
+            txn,
             store.clone(),
             Arc::clone(&backend_arc),
         ));
@@ -53,7 +55,6 @@ impl AppState {
             store,
             backend: backend_arc,
             auth,
-            txn,
             structured,
         }
     }

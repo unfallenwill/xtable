@@ -14,7 +14,6 @@ xtable-core = { path = "../xtable-core" }
 xtable-storage = { path = "../xtable-storage" }
 xtable-backend = { path = "../xtable-backend" }
 xtable-auth = { path = "../xtable-auth" }
-xtable-s3 = { path = "../xtable-s3" }
 xtable-tx = { path = "../xtable-tx" }
 xtable-schema = { path = "../xtable-schema" }
 
@@ -26,7 +25,6 @@ hyper = { workspace = true }
 http = "1.1"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-metrics = { workspace = true }
 figment = { workspace = true }
 toml = { workspace = true }
 anyhow = { workspace = true }
@@ -34,7 +32,6 @@ clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
-s3s = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

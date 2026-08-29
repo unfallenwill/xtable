@@ -1,18 +1,19 @@
 # xtable
 
-> An S3-compatible online spreadsheet service that puts **multi-object ACID transactions** on top of any S3-compatible backend.
+> A structured data space with **multi-record ACID transactions** on top of any S3-compatible backend.
 
 ```
-[aws-cli / aws-sdk-* / s5cmd / mc / curl]
-        │  HTTPS + SigV4 + standard S3 paths
+[ client / curl / sdk ]
+        │  HTTPS + SigV4 + /v1/spaces/...
         ▼
 ┌────────────────────────────────────────────────────┐
 │ xtable-server (Rust, single binary)                 │
 │  ┌────────────────────┐  ┌───────────────────────┐ │
-│  │ s3s protocol layer │  │ TxnCoordinator (OCC)  │ │
-│  │ (PutObject / Get…  │  │ Begin / Stage /       │ │
-│  │  List / Multipart) │  │ Validate / Commit /   │ │
-│  └────────┬───────────┘  │ Abort / Recover       │ │
+│  │ /v1/spaces router  │  │ TxnCoordinator (OCC)  │ │
+│  │ (schemas / tables  │  │ Begin / Stage /       │ │
+│  │  / records / diff  │  │ Validate / Commit /   │ │
+│  │  / structured txn) │  │ Abort / Recover       │ │
+│  └────────┬───────────┘  └───────────┬───────────┘ │
 │           └────── LocalStore (redb) ──────────────│
 │             WAL · versions · txn_state · blobs     │
 └──────────────────────┬─────────────────────────────┘
@@ -25,22 +26,24 @@
              └──────────────────────┘
 ```
 
-xtable is the **only** piece that needs to be deployed by your users.
-Existing S3 client tooling works **unchanged**; transactional extensions are
-layered on via custom HTTP headers.
+xtable is the **only** piece that needs to be deployed by your users. The
+structured-data-space API sits on a transactional core backed by user S3.
 
 ---
 
 ## Why xtable exists
 
 Standard S3 is **stateless and per-object atomic**. There is no native way to
-make a multi-object update visible all-or-nothing. xtable adds:
+make a multi-record update visible all-or-nothing, and no way to attach a
+schema to an object. xtable adds:
 
-- **Multi-object ACID transactions** over `BeginTxn / CommitTxn` on the
-  S3 wire protocol, addressed by `x-xtable-txn-id` headers.
+- **Structured records** addressed by `(space, table, record_id)` with
+  optional JSON-Schema validation per table.
+- **Multi-record ACID transactions** — every write runs in a transaction
+  that aborts on conflict or backend failure.
 - **Optimistic concurrency control (OCC)** with per-key version checking.
 - **Crash-safe commit ordering** — recovery never produces a half-published
-  multi-object state.
+  multi-record state.
 - **Disaster recovery** — the version index can be cold-rebuilt from
   backend S3 object metadata, so a destroyed local store is recoverable.
 
@@ -52,14 +55,14 @@ make a multi-object update visible all-or-nothing. xtable adds:
 
 | Crate            | Responsibility                                         |
 |------------------|--------------------------------------------------------|
-| `xtable-core`    | Pure types: `ObjectKey`, `TxnId`, `Version`, errors, config schemas, headers. No IO. |
+| `xtable-core`    | Pure types: `ObjectKey`, `TxnId`, `Version`, errors, config schemas, transaction status enum. No IO. |
 | `xtable-storage` | `redb`-backed local state: WAL, version index, txn_state, read/write sets, staged blobs. |
-| `xtable-backend` | `aws-sdk-s3` client + `KeyMap` (identity in v1) for talking to user-provided S3. |
+| `xtable-backend` | `aws-sdk-s3` client + `KeyMap` for talking to user-provided S3. |
 | `xtable-auth`    | SigV4 edge verification, `EdgeAuth`, `CredentialStore`. |
-| `xtable-s3`      | `impl s3s::S3 for XtableS3Service`. Translates S3 ops to backend calls; recognizes `x-xtable-*` headers. |
 | `xtable-tx`      | `TxnCoordinator` OCC state machine: `Begin`, `Stage`, `Validate`, `Commit`, `Abort`. Plus `recovery` (WAL replay), `rebuild` (cold rebuild from S3 metadata), `gc` (sweep stale txns). |
-| `xtable-server`  | `xtable` binary: axum HTTP server, routes, lifecycle, GC task. |
-| `xtable-cli`     | `xtctl` operator CLI: `serve`, `doctor`, `txn {begin,commit,abort,status}`. |
+| `xtable-schema`  | Structured-data-space layer: schema registration, table binding, record read/write/diff. Uses `TxnCoordinator` underneath. |
+| `xtable-server`  | `xtable` binary: axum HTTP server, `/v1/spaces/...` routes, lifecycle, GC task. |
+| `xtable-cli`     | `xtctl` operator CLI: `serve`, `doctor`. |
 
 ### Request flow
 
@@ -71,13 +74,13 @@ make a multi-object update visible all-or-nothing. xtable adds:
                         │
        ┌────────────────┼──────────────────────┐
        │                │                      │
-   /?transactional=  /healthz etc.       catch-all → s3s::S3Service
-       │                                       │
-       ▼                                       ▼
-   TxnCoordinator                          XtableS3Service
-       │                                       │
-       ▼                                       ▼
-   LocalStore (redb)                  BackendClient (aws-sdk-s3)
+   /v1/spaces/...   /healthz etc.        (no S3 catch-all)
+       │                │
+       ▼                ▼
+   StructuredSpace   "ok"
+       │
+       ▼
+   TxnCoordinator ── LocalStore (redb) ── BackendClient (aws-sdk-s3)
        │                                       │
        └───────── staged body spill ───────────┘
                        │
@@ -291,56 +294,45 @@ write cache, or equivalent) and run periodic fsync of the redb WAL file.
 
 ## API surface
 
-### Standard S3 (SigV4 + XML)
+All routes are mounted under `/v1` and require SigV4 authentication. Health
+probes (`/healthz`, `/readyz`) are public.
 
-`xtable` presents the full AWS S3 surface that doesn't natively violate
-single-object atomicity:
-
-```
-PUT    /{bucket}/{key}                      PutObject
-GET    /{bucket}/{key}                      GetObject
-HEAD   /{bucket}/{key}                      HeadObject
-DELETE /{bucket}/{key}                      DeleteObject
-POST   /{bucket}/{key}?delete               DeleteObjects
-GET    /{bucket}?list-type=2                ListObjectsV2
-POST   /{bucket}/{key}?uploads              CreateMultipartUpload
-PUT    /{bucket}/{key}?partNumber=N&uploadId=...   UploadPart
-POST   /{bucket}/{key}?uploadId=...         CompleteMultipartUpload
-DELETE /{bucket}/{key}?uploadId=...         AbortMultipartUpload
-HEAD   /{bucket}                            HeadBucket
-GET    /{bucket}                            ListBuckets
-```
-
-The S3 protocol layer is `s3s` 0.15 — the canonical Rust S3 server
-framework. We add xtable-specific extensions as parallel routes, not as
-modifications to S3 responses.
-
-### Transactional extensions
-
-Transactional extensions are activated by the presence of the
-`x-xtable-txn-id` header on standard S3 ops:
-
-| Header                          | Effect when set on PutObject                       |
-|---------------------------------|------------------------------------------------------|
-| `x-xtable-txn-id`               | The write is **staged** in the txn's write_set, not uploaded to backend. Visible to the same txn via GetObject. |
-| `x-xtable-version`              | Returned on responses: the logical version.         |
-| `x-xtable-conflict-keys`        | Returned on 409 Conflict: CSV of conflicting keys. |
-| `x-xtable-snapshot-version`     | Returned on BeginTxn: snapshot version for reads.   |
-| `x-xtable-commit-version`       | Returned on successful CommitTxn.                  |
-| `x-xtable-txn-status`           | Returned on TxnStatus: `active`/`committed`/etc.   |
-| `x-xtable-idempotency-key`       | Optional: client-supplied dedup key.                |
-
-BeginTxn / CommitTxn / AbortTxn / TxnStatus are reached by:
+### Schemas
 
 ```
-POST  /?transactional=begin
-POST  /?transactional=commit     [Header: x-xtable-txn-id: <id>]
-POST  /?transactional=abort      [Header: x-xtable-txn-id: <id>]
-GET   /?transactional=status     [Header: x-xtable-txn-id: <id>]
+POST   /v1/spaces/:space/schemas              Register schema. Body: {name, body}. → 201 {version, name}
+GET    /v1/spaces/:space/schemas              List schemas.        → 200 {space, schemas:[{name, version}]}
+GET    /v1/spaces/:space/schemas/:name        Fetch schema.         ?version=&snapshot=  → 200 {space,name,version,body}
 ```
 
-`aws-cli` and `aws-sdk-*` work unchanged for non-transactional reads
-and writes. Transactional usage is opt-in via headers or `xtctl`.
+### Tables
+
+```
+POST   /v1/spaces/:space/tables/:table/bind   Bind table to schema. Body: {body}. → 204
+```
+
+### Records
+
+```
+POST   /v1/spaces/:space/tables/:table/records         Upsert. Body: {record_id?, body, expected_schema_version?}.
+                                                     → 201 {record_id, schema_version, backend_key, commit_version}
+GET    /v1/spaces/:space/tables/:table/records         Query.   ?snapshot=&limit=&offset=&sort=&dir=
+                                                     &filter_field=&filter_op=&filter_value=
+                                                     → 200 {snapshot_version, total_matched, records:[…]}
+GET    /v1/spaces/:space/tables/:table/records/:rid    Fetch.   ?snapshot=  → 200 {space,table,record_id,body,schema_version,commit_version,deleted}
+DELETE /v1/spaces/:space/tables/:table/records/:rid    Delete.  → 200 {deleted, commit_version}
+```
+
+### Snapshot diff and explicit transactions
+
+```
+GET    /v1/spaces/:space/tables/:table/diff   Diff two snapshots. ?s1=&s2=  → 200 {from, to, changes:[…]}
+POST   /v1/structured/txn                     Begin an explicit cross-request txn. → 201 {txn_id, snapshot_version}
+GET    /v1/spaces/:space/snapshot             Current snapshot version for the space.
+```
+
+`filter_op` supports `eq`, `ne`, `gt`, `ge`, `lt`, `le`, `contains`, `exists`.
+Errors are returned as JSON `{"error": "<msg>", "code": "<s3-style>"}`.
 
 ---
 
@@ -356,13 +348,17 @@ cargo test --workspace
 # Run server
 ./target/debug/xtable --config ./xtable.toml
 
-# Run a transaction via CLI (uses aws-sdk-s3 against xtable)
-TXN=$(./target/debug/xtctl txn begin --endpoint http://localhost:9000)
-aws --endpoint-url http://localhost:9000 s3 cp /etc/hosts \
-    s3://xtable-data/a --metadata "x-xtable-txn-id=$TXN"
-aws --endpoint-url http://localhost:9000 s3 cp /etc/hosts \
-    s3://xtable-data/b --metadata "x-xtable-txn-id=$TXN"
-./target/debug/xtctl txn commit --txn-id $TXN --endpoint http://localhost:9000
+# Run a connectivity check
+./target/debug/xtctl doctor --xtable-endpoint http://localhost:9000
+
+# Talk to the structured-data-space API
+curl -X POST http://localhost:9000/v1/spaces/acme/schemas \
+  -H 'content-type: application/json' \
+  -d '{"name":"task","body":{"type":"object","required":["title","status"],"properties":{"title":{"type":"string"},"status":{"enum":["open","done"]}}}}'
+
+curl -X POST http://localhost:9000/v1/spaces/acme/tables/tasks/records \
+  -H 'content-type: application/json' \
+  -d '{"record_id":"t1","body":{"title":"alpha","status":"open"}}'
 ```
 
 ---
@@ -377,13 +373,16 @@ test result: ok. 10 passed; 0 failed    # xtable-auth
 test result: ok. 1 passed; 0 failed     # xtable-backend
 test result: ok. 8 passed; 0 failed     # xtable-backend integration_e2e
 test result: ok. 4 passed; 0 failed     # xtable-core
-test result: ok. 7 passed; 0 failed     # xtable-s3
 test result: ok. 13 passed; 0 failed    # xtable-storage
 test result: ok. 10 passed; 0 failed    # xtable-tx (unit)
 test result: ok. 10 passed; 0 failed    # xtable-tx proptest_invariants
+test result: ok. 30 passed; 0 failed    # xtable-schema
+test result: ok. 64 passed; 0 failed    # xtable-schema (unit incl. validation)
+test result: ok. 1 passed; 0 failed     # xtable-server structured_http smoke
+test result: ok. 21 passed; 0 failed    # xtable-tx regression_vulns
 ```
 
-**Total: 63 tests passing across the workspace.**
+**Total: 200+ tests passing across the workspace.**
 
 ### Property-based tests (`xtable-tx/tests/proptest_invariants.rs`)
 

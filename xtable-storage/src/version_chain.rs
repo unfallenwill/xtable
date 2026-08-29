@@ -4,15 +4,15 @@
 //! `commit_version` ascending. Reads at a snapshot walk the chain from newest
 //! to oldest, picking the first entry with `commit_version ≤ snapshot`.
 //!
-//! Invariants (proved in `MVCC_RELIABILITY.md`):
-//! - I1: chain[k].entries is strictly ascending by commit_version
-//! - I2: aborted txns leave no entry
-//! - I3: read at snapshot S returns entry with `commit_version ≤ S` (newest)
-//! - I4: read-your-own-writes within a txn
-//! - I5: OCC conflict semantics preserved (uses chain newest ≤ version_at_read)
-//! - I6: multi-object commit is atomic
-//! - I7: WAL replay recovers equivalent chain state
-//! - I8: GC safety
+//! Invariants:
+//! - chain[k].entries is strictly ascending by commit_version
+//! - aborted txns leave no entry
+//! - read at snapshot S returns entry with `commit_version ≤ S` (newest)
+//! - read-your-own-writes within a txn
+//! - OCC conflict semantics preserved (uses chain newest ≤ version_at_read)
+//! - multi-object commit is atomic
+//! - WAL replay recovers equivalent chain state
+//! - GC safety
 
 use serde::{Deserialize, Serialize};
 
