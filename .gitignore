@@ -1,0 +1,27 @@
+/target
+**/target
+Cargo.lock.bak
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local data
+/var/lib/xtable
+data/
+staged/
+*.redb
+*.redb.lock
+
+# Logs
+*.log
+
+# Secrets / local config
+.env
+.claude/settings.local.json

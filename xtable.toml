@@ -1,0 +1,42 @@
+# xtable default configuration.
+# Copy to xtable.local.toml and customize, or override via env vars (XTABLE_*).
+
+[server]
+listen = "0.0.0.0:9000"
+public_endpoint = "http://localhost:9000"
+data_dir = "/var/lib/xtable"
+log_level = "info"
+shutdown_grace_secs = 30
+
+[auth]
+edge_access_key_id = "xtableadmin"
+edge_secret_access_key = "changeme"
+allow_anonymous_read = false
+
+[backend]
+endpoint = "http://localhost:9001"
+region = "us-east-1"
+bucket = "xtable-data"
+access_key_id = "minioadmin"
+secret_access_key = "minioadmin"
+force_path_style = true
+request_timeout_ms = 30000
+multipart_threshold_bytes = 16777216
+multipart_part_size_bytes = 16777216
+
+[txn]
+default_timeout_secs = 60
+max_concurrent = 4096
+heartbeat_interval_secs = 15
+gc_interval_secs = 60
+commit_upload_concurrency = 16
+staged_body_threshold_bytes = 262144
+
+[storage]
+redb_dir = "/var/lib/xtable/redb"
+staged_body_spill_dir = "/var/lib/xtable/staged"
+max_staged_bytes = 109951162777600   # 100 GiB
+
+[observability]
+otlp_endpoint = ""
+metrics_listen = "127.0.0.1:9090"

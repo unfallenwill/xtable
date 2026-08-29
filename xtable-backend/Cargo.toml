@@ -1,0 +1,30 @@
+[package]
+name = "xtable-backend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+xtable-core = { path = "../xtable-core" }
+
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+aws-credential-types = { workspace = true }
+aws-smithy-runtime-api = { workspace = true }
+
+tokio = { workspace = true }
+async-trait = { workspace = true }
+bytes = "1.7"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+axum = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+xtable-storage = { path = "../xtable-storage" }
+xtable-tx = { path = "../xtable-tx" }
+tempfile = { workspace = true }

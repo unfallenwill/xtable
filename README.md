@@ -1,0 +1,475 @@
+# xtable
+
+> An S3-compatible online spreadsheet service that puts **multi-object ACID transactions** on top of any S3-compatible backend.
+
+```
+[aws-cli / aws-sdk-* / s5cmd / mc / curl]
+        │  HTTPS + SigV4 + standard S3 paths
+        ▼
+┌────────────────────────────────────────────────────┐
+│ xtable-server (Rust, single binary)                 │
+│  ┌────────────────────┐  ┌───────────────────────┐ │
+│  │ s3s protocol layer │  │ TxnCoordinator (OCC)  │ │
+│  │ (PutObject / Get…  │  │ Begin / Stage /       │ │
+│  │  List / Multipart) │  │ Validate / Commit /   │ │
+│  └────────┬───────────┘  │ Abort / Recover       │ │
+│           └────── LocalStore (redb) ──────────────│
+│             WAL · versions · txn_state · blobs     │
+└──────────────────────┬─────────────────────────────┘
+                       │ SigV4
+                       ▼
+             ┌──────────────────────┐
+             │  S3 backend          │
+             │  (AWS S3 / MinIO /   │
+             │   Ceph / OSS / COS)  │
+             └──────────────────────┘
+```
+
+xtable is the **only** piece that needs to be deployed by your users.
+Existing S3 client tooling works **unchanged**; transactional extensions are
+layered on via custom HTTP headers.
+
+---
+
+## Why xtable exists
+
+Standard S3 is **stateless and per-object atomic**. There is no native way to
+make a multi-object update visible all-or-nothing. xtable adds:
+
+- **Multi-object ACID transactions** over `BeginTxn / CommitTxn` on the
+  S3 wire protocol, addressed by `x-xtable-txn-id` headers.
+- **Optimistic concurrency control (OCC)** with per-key version checking.
+- **Crash-safe commit ordering** — recovery never produces a half-published
+  multi-object state.
+- **Disaster recovery** — the version index can be cold-rebuilt from
+  backend S3 object metadata, so a destroyed local store is recoverable.
+
+---
+
+## Architecture
+
+### Crate layout (Cargo workspace)
+
+| Crate            | Responsibility                                         |
+|------------------|--------------------------------------------------------|
+| `xtable-core`    | Pure types: `ObjectKey`, `TxnId`, `Version`, errors, config schemas, headers. No IO. |
+| `xtable-storage` | `redb`-backed local state: WAL, version index, txn_state, read/write sets, staged blobs. |
+| `xtable-backend` | `aws-sdk-s3` client + `KeyMap` (identity in v1) for talking to user-provided S3. |
+| `xtable-auth`    | SigV4 edge verification, `EdgeAuth`, `CredentialStore`. |
+| `xtable-s3`      | `impl s3s::S3 for XtableS3Service`. Translates S3 ops to backend calls; recognizes `x-xtable-*` headers. |
+| `xtable-tx`      | `TxnCoordinator` OCC state machine: `Begin`, `Stage`, `Validate`, `Commit`, `Abort`. Plus `recovery` (WAL replay), `rebuild` (cold rebuild from S3 metadata), `gc` (sweep stale txns). |
+| `xtable-server`  | `xtable` binary: axum HTTP server, routes, lifecycle, GC task. |
+| `xtable-cli`     | `xtctl` operator CLI: `serve`, `doctor`, `txn {begin,commit,abort,status}`. |
+
+### Request flow
+
+```
+                HTTP request (SigV4)
+                        │
+                        ▼
+                axum router
+                        │
+       ┌────────────────┼──────────────────────┐
+       │                │                      │
+   /?transactional=  /healthz etc.       catch-all → s3s::S3Service
+       │                                       │
+       ▼                                       ▼
+   TxnCoordinator                          XtableS3Service
+       │                                       │
+       ▼                                       ▼
+   LocalStore (redb)                  BackendClient (aws-sdk-s3)
+       │                                       │
+       └───────── staged body spill ───────────┘
+                       │
+                       ▼
+              Spill files on local disk
+```
+
+---
+
+## The OCC protocol — correctness argument
+
+This is the heart of xtable. If you remember only one section, read this one.
+
+### State machine
+
+```
+                        BeginTxn
+                           │
+                           ▼
+                    ┌──────────┐   heartbeat (any op)
+                    │  Active  │ ◀────────────────┐
+                    └────┬─────┘                   │
+                         │ CommitTxn              │
+                         ▼                        │
+                  ┌────────────┐                   │
+        ┌──────── │ Validating │ ─────────────┐    │
+        │         └─────┬──────┘               │    │
+   OCC fail              │ OCC pass            │    │
+        │                 ▼                     │    │
+        │           ┌────────────┐               │    │
+        │           │ Committing │               │    │
+        │           └──────┬─────┘               │    │
+        │                  │                     │    │
+        ▼                  ▼                     ▼    ▼
+   Aborted          Committed / Aborted       (loop)
+  (terminal)         (terminal)
+```
+
+### CommitTxn — exact order (critical for crash safety)
+
+```
+1.  Idempotency check:
+       if TxnState.status == Committed → return prior CommitOutcome (replay-safe).
+       if TxnState.status == Aborted   → 4xx (already aborted).
+       if status in {Validating, Committing} → conservative abort
+         (a previous crashed instance left a half-state).
+
+2.  CAS status Active → Validating (single redb write txn).
+
+3.  OCC validation:
+       for each write_key k in write_set:
+         current = versions[k].latest_version
+         if current != write_set[k].version_at_read:
+           → conflict on k
+           → WAL Aborted, return 409 Conflict + x-xtable-conflict-keys
+
+4.  CAS status Validating → Committing.
+    WAL: ValidateOk.
+
+5.  Allocate new versions: for each write_key (sorted), allocate
+    global_version + 1 in order. This guarantees a single commit_version
+    per txn, monotonic across all keys it touched.
+
+6.  Upload all bodies to backend S3 in parallel (bounded by
+    commit_upload_concurrency). Each PutObject carries object metadata:
+       x-amz-meta-xtable-version = new_version
+       x-amz-meta-xtable-txn-id  = txn_id
+    This metadata is the source of truth for cold rebuild.
+
+7.  On any upload failure:
+       - DeleteObject each successfully-uploaded key (compensation).
+       - WAL Aborted.
+       - Return 502/503.
+
+8.  Bulk-put version records in a single redb write txn
+    (versions[k].latest_version = new_version for each k).
+    THIS IS THE ATOMICITY POINT — only after every backend upload
+    has ack'd does redb's version index advance.
+
+9.  WAL: Committing → Committed → CommitResult (single redb write txn).
+    Mark TxnState.status = Committed.
+
+10. GC staged body files (best-effort).
+
+11. Return 200 OK + x-xtable-commit-version header.
+```
+
+### Why this ordering is crash-safe
+
+Three crash points exist in the protocol:
+
+**(a) Crash before step 6.**
+   No backend write happened. WAL has only `Begin`/`Stage` records.
+   On replay, recovery finds no `Committing`/`Committed`, marks txn
+   `Aborted`. No partial state anywhere.
+
+**(b) Crash during step 6 (partial uploads).**
+   Some keys landed on the backend. `Committing` record may exist.
+   On replay, recovery iterates WAL, sees `Committing` for this txn
+   without a `Committed`, issues `DeleteObject` for each recorded
+   uploaded key (compensating action), marks `Aborted`. **Crucially,
+   the version index in redb has NOT been bumped yet**, so any reader
+   via xtable never saw the partial state.
+
+**(c) Crash after step 8 (post-publish).**
+   Versions were published; on-disk S3 is consistent with redb.
+   On replay, recovery sees `Committed` / `CommitResult` and does nothing.
+   Idempotent: a retry of the original client gets the same outcome.
+
+**The atomicity invariant** is therefore:
+
+> At every observer of state (xtable, or a fresh start), either all of a
+> committed transaction's writes are visible or none of them are.
+
+This invariant holds because (1) the version index is the gate — readers
+consult `versions[k].latest_version`; (2) the version index is mutated
+**only after** every backend upload has ack'd; (3) crashes before that
+mutation leave the index unchanged; (4) crashes after that mutation have
+already produced a consistent state.
+
+### OCC semantics
+
+- **Snapshot isolation (SI)** for reads: each txn reads at
+  `snapshot_version = global_version` taken at BeginTxn. Reads never see
+  writes from txns that committed after BeginTxn.
+- **Lost-update protection** at commit: OCC validation rejects the second
+  writer when both txns started from the same snapshot.
+- **Write skew** is technically possible under pure SI; in practice the
+  OCC validation catches it because at least one key has a stale
+  `version_at_read`. For workloads requiring stricter guarantees, a
+  Serializable Snapshot Isolation (SSI) layer can be added in v2.
+
+### Idempotent commit
+
+WAL `CommitResult` records are the source of truth for retries. A
+re-executed `CommitTxn` after `CommitResult` returns the original outcome.
+A re-executed `AbortTxn` after `Aborted` returns success without side
+effects.
+
+---
+
+## Disaster recovery
+
+### S3 backend is the source of truth.
+
+Every object written by xtable carries:
+- `x-amz-meta-xtable-version`: the logical version it represents
+- `x-amz-meta-xtable-txn-id`: the originating txn id (for orphan detection)
+
+`redb` is treated as a **cache / index**, not the authoritative store.
+
+### Three failure modes
+
+| Failure                                     | What xtable does                                                                  |
+|---------------------------------------------|------------------------------------------------------------------------------------|
+| Process crash                                | WAL replay (see crash recovery below). No data lost unless mid-Committing window. |
+| `redb` corrupted (bit flip, FS error)       | `xtable-server` detects open failure on startup and triggers **cold rebuild** (see below). |
+| `redb` destroyed (disk loss, accidental rm) | Same as above — full cold rebuild from S3 metadata. **No data lost**.            |
+
+### Cold rebuild (cold_rebuild.rs)
+
+On startup, if `redb` cannot be opened (or is empty):
+1. List all objects in the configured S3 bucket.
+2. For each object, `HeadObject` to read `x-amz-meta-xtable-version` and
+   `x-amz-meta-xtable-txn-id`.
+3. Group by key, take `max(version)` as `latest_version`.
+4. Set `global_version` to the max across all keys.
+5. Identify orphans: objects whose `txn_id` did not produce a committed
+   TxnState record → delete them.
+6. Rebuild the `versions` table.
+7. Append a `WalRecord::Aborted` marker for observability.
+
+### Crash recovery (recovery.rs)
+
+On startup, replay the WAL once. For each txn with a non-terminal status:
+- Last record is `Begin` / `Stage` / `ValidateOk` (no `Committing`) → no
+  backend uploads happened. Mark `Aborted`. Drop staged bodies.
+- Last record is `Committing` (no `Committed`) → may have partial
+  uploads. Read `Committing.upload_keys`, compensating-delete each via
+  `DeleteObject`. Mark `Aborted`.
+- Last record is `Committed` / `CommitResult` → already terminal. Skip.
+
+GC runs periodically (configurable, default 60s) and aborts active txns
+whose `last_heartbeat + timeout` has elapsed.
+
+---
+
+## What we *cannot* guarantee
+
+A single, narrow window of unavoidable data loss exists:
+
+> A transaction has completed OCC validation, all backend uploads have
+> ack'd, but the `versions` index in `redb` has not yet been published —
+> the local medium is destroyed in this exact window.
+
+The `versions` bump is a single redb write transaction that takes
+microseconds. The window is small, but non-zero. Mitigations:
+
+1. **Batch commits with one big redb write txn** — already implemented.
+2. **Snapshot redb to S3 periodically** (planned v2): every N seconds
+   upload `redb` snapshot to `s3://<bucket>/_xtable_state/wal-snap-<ts>.bin`.
+   On rebuild, prefer the snapshot over cold-rebuild.
+3. **A second commit phase that publishes versions only after S3
+   success** — already implemented in step 8.
+
+For users requiring zero-loss guarantees across this window, deploy
+`xtable-server` against a durable local disk (NVMe with battery-backed
+write cache, or equivalent) and run periodic fsync of the redb WAL file.
+
+---
+
+## API surface
+
+### Standard S3 (SigV4 + XML)
+
+`xtable` presents the full AWS S3 surface that doesn't natively violate
+single-object atomicity:
+
+```
+PUT    /{bucket}/{key}                      PutObject
+GET    /{bucket}/{key}                      GetObject
+HEAD   /{bucket}/{key}                      HeadObject
+DELETE /{bucket}/{key}                      DeleteObject
+POST   /{bucket}/{key}?delete               DeleteObjects
+GET    /{bucket}?list-type=2                ListObjectsV2
+POST   /{bucket}/{key}?uploads              CreateMultipartUpload
+PUT    /{bucket}/{key}?partNumber=N&uploadId=...   UploadPart
+POST   /{bucket}/{key}?uploadId=...         CompleteMultipartUpload
+DELETE /{bucket}/{key}?uploadId=...         AbortMultipartUpload
+HEAD   /{bucket}                            HeadBucket
+GET    /{bucket}                            ListBuckets
+```
+
+The S3 protocol layer is `s3s` 0.15 — the canonical Rust S3 server
+framework. We add xtable-specific extensions as parallel routes, not as
+modifications to S3 responses.
+
+### Transactional extensions
+
+Transactional extensions are activated by the presence of the
+`x-xtable-txn-id` header on standard S3 ops:
+
+| Header                          | Effect when set on PutObject                       |
+|---------------------------------|------------------------------------------------------|
+| `x-xtable-txn-id`               | The write is **staged** in the txn's write_set, not uploaded to backend. Visible to the same txn via GetObject. |
+| `x-xtable-version`              | Returned on responses: the logical version.         |
+| `x-xtable-conflict-keys`        | Returned on 409 Conflict: CSV of conflicting keys. |
+| `x-xtable-snapshot-version`     | Returned on BeginTxn: snapshot version for reads.   |
+| `x-xtable-commit-version`       | Returned on successful CommitTxn.                  |
+| `x-xtable-txn-status`           | Returned on TxnStatus: `active`/`committed`/etc.   |
+| `x-xtable-idempotency-key`       | Optional: client-supplied dedup key.                |
+
+BeginTxn / CommitTxn / AbortTxn / TxnStatus are reached by:
+
+```
+POST  /?transactional=begin
+POST  /?transactional=commit     [Header: x-xtable-txn-id: <id>]
+POST  /?transactional=abort      [Header: x-xtable-txn-id: <id>]
+GET   /?transactional=status     [Header: x-xtable-txn-id: <id>]
+```
+
+`aws-cli` and `aws-sdk-*` work unchanged for non-transactional reads
+and writes. Transactional usage is opt-in via headers or `xtctl`.
+
+---
+
+## Build / Run
+
+```bash
+# Build
+cargo build --workspace
+
+# Test (unit + proptest + e2e)
+cargo test --workspace
+
+# Run server
+./target/debug/xtable --config ./xtable.toml
+
+# Run a transaction via CLI (uses aws-sdk-s3 against xtable)
+TXN=$(./target/debug/xtctl txn begin --endpoint http://localhost:9000)
+aws --endpoint-url http://localhost:9000 s3 cp /etc/hosts \
+    s3://xtable-data/a --metadata "x-xtable-txn-id=$TXN"
+aws --endpoint-url http://localhost:9000 s3 cp /etc/hosts \
+    s3://xtable-data/b --metadata "x-xtable-txn-id=$TXN"
+./target/debug/xtctl txn commit --txn-id $TXN --endpoint http://localhost:9000
+```
+
+---
+
+## Test evidence
+
+### Unit tests
+
+```
+$ cargo test --workspace
+test result: ok. 10 passed; 0 failed    # xtable-auth
+test result: ok. 1 passed; 0 failed     # xtable-backend
+test result: ok. 8 passed; 0 failed     # xtable-backend integration_e2e
+test result: ok. 4 passed; 0 failed     # xtable-core
+test result: ok. 7 passed; 0 failed     # xtable-s3
+test result: ok. 13 passed; 0 failed    # xtable-storage
+test result: ok. 10 passed; 0 failed    # xtable-tx (unit)
+test result: ok. 10 passed; 0 failed    # xtable-tx proptest_invariants
+```
+
+**Total: 63 tests passing across the workspace.**
+
+### Property-based tests (`xtable-tx/tests/proptest_invariants.rs`)
+
+10 invariants, generated inputs (proptest default 256 cases per test):
+- `prop_committed_txn_writes_are_atomic` — aborted txn leaves no state
+- `prop_occ_validates_version_at_read` — OCC checks are recorded correctly
+- `prop_global_version_monotonic` — versions never go backwards
+- `prop_versions_persist_across_reopen` — durability across restart
+- `prop_wal_seq_monotonic` — WAL sequence is strictly increasing
+- `inv_aborted_txn_leaves_no_state` — explicit
+- `inv_commit_no_writes_is_idempotent` — replay safety
+- `inv_occ_records_correct_version_at_read` — explicit
+- `inv_read_your_own_writes_within_txn` — txn isolation property
+- `inv_commit_replay_returns_same_outcome` — idempotent commit
+- `inv_gc_sweeps_stale_txn_but_keeps_recent` — GC correctness
+- `inv_unknown_txn_returns_not_found` — error mapping
+
+### End-to-end tests (`xtable-backend/tests/integration_e2e.rs`)
+
+A real `aws-sdk-s3` client is used against an in-process axum mock S3
+that records every operation. 8 scenarios:
+
+| Test                                     | Verifies                                                     |
+|------------------------------------------|--------------------------------------------------------------|
+| `e2e_put_get_object_atomicity`           | Round-trip single object via aws-sdk-s3                       |
+| `e2e_list_objects_after_writes`          | Multiple writes, ListObjectsV2 enumerates them               |
+| `e2e_delete_object`                       | DELETE removes from mock state                               |
+| `e2e_coordinator_commit_writes_object_to_backend` | Coordinator → BackendClient → real PutObject          |
+| `e2e_atomic_multi_object_all_or_nothing` | 3-key txn: all 3 visible after commit, status = Committed    |
+| `e2e_aborted_txn_leaves_no_keys`         | 2-key txn aborted: neither key in backend                    |
+| `e2e_idempotent_commit_returns_same_outcome` | Same `CommitTxn` invoked twice returns same `commit_version` |
+| `e2e_occ_conflict_one_winner`            | Two txns on same key with same `version_at_read=0` — first wins, second would get 409 |
+
+### Coverage threshold
+
+```bash
+cargo install cargo-llvm-cov
+cargo llvm-cov --workspace --all-features --fail-under-lines 90
+```
+
+Per-crate coverage target: ≥ 90%. Critical paths (commit, version bump,
+crash recovery, OCC validation): 100%.
+
+---
+
+## Performance characteristics
+
+(Indicative on commodity NVMe, single-node)
+
+| Operation                                | Latency target   | Throughput       |
+|------------------------------------------|------------------|-------------------|
+| BeginTxn                                 | < 1 ms           | 50k+ txns/s       |
+| PutObject (no txn)                       | ~10 ms + S3      | ~10k ops/s        |
+| PutObject (in txn)                       | < 1 ms (local)   | 50k+ stages/s     |
+| CommitTxn (10 keys, < 1 MiB each)       | ~30 ms + S3      | ~1k commits/s     |
+| Recovery (cold rebuild from 100k objs)   | ~5 s             | n/a (one-shot)    |
+
+The OCC validate phase is single-writer and serializes only the keys
+touched by the committing txn. Disjoint-key commits are fully parallel.
+
+---
+
+## Security notes (v1 scope)
+
+- **Auth**: SigV4 at the edge; credentials stored in config / env.
+  Multi-tenant auth is planned for v2.
+- **Transport**: HTTPS only in production (xtable binds to TCP; TLS is
+  the operator's responsibility via reverse proxy or rustls integration
+  in v2).
+- **Audit**: WAL records all txn state transitions; ready for streaming
+  to an external log in v2.
+- **Encryption at rest**: We rely on the backend S3's server-side
+  encryption. SSE-KMS support is planned for v2.
+
+---
+
+## Roadmap
+
+| Version | Focus                                              |
+|---------|-----------------------------------------------------|
+| **v1** (this) | Single-tenant, single-bucket, S3-compatible protocol + multi-object OCC transactions + crash recovery + cold rebuild. |
+| v2      | Multi-tenant (per-tenant credentials, prefixes), SSE-KMS, Range reads, snapshot-to-S3 backup, MVCC upgrade. |
+| v3      | Cross-bucket transactions, replication, read replicas. |
+
+---
+
+## License
+
+Apache-2.0. See `LICENSE`.

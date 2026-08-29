@@ -1,0 +1,37 @@
+[package]
+name = "xtable-tx"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+xtable-core = { path = "../xtable-core" }
+xtable-storage = { path = "../xtable-storage" }
+xtable-backend = { path = "../xtable-backend" }
+
+redb = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+ulid = { workspace = true }
+futures = { workspace = true }
+futures-util = "0.3"
+sha2 = { workspace = true }
+hex = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tokio-test = { workspace = true }
+tempfile = { workspace = true }
+futures = { workspace = true }
+xtable-backend = { path = "../xtable-backend" }
+xtable-auth = { path = "../xtable-auth" }
+http = "1.1"
+hmac = "0.12"
+sha2 = { workspace = true }
+hex = { workspace = true }

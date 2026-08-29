@@ -1,0 +1,89 @@
+[workspace]
+resolver = "2"
+members = [
+    "xtable-core",
+    "xtable-storage",
+    "xtable-backend",
+    "xtable-auth",
+    "xtable-s3",
+    "xtable-tx",
+    "xtable-server",
+    "xtable-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.78"
+license = "Apache-2.0"
+repository = "https://github.com/xtable/xtable"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# HTTP / server
+axum = { version = "0.7", features = ["macros", "tokio", "http1"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace", "timeout", "limit", "request-id", "util"] }
+hyper = { version = "1.4", features = ["full"] }
+
+# S3 protocol (server side)
+s3s = { version = "0.15" }
+
+# AWS SDK (backend client)
+aws-config = { version = "1.5", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1.55"
+aws-credential-types = "1.2"
+aws-smithy-runtime-api = "1.7"
+
+# Local KV store
+redb = "2.2"
+
+# Serde / encoding
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = { version = "1.3" }
+quick-xml = { version = "0.36", features = ["serialize"] }
+
+# IDs / time / hashing
+ulid = { version = "1.1", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.8"
+
+# Errors / tracing / metrics
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+metrics = "0.23"
+
+# CLI
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Config
+figment = { version = "0.10", features = ["toml", "env"] }
+toml = "0.8"
+
+# Path resolution
+dirs = "5"
+
+# Test-only deps (placed at workspace level for `workspace = true` inheritance)
+proptest = "1.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3.10"
+tokio-test = "0.4"
+# Coverage tool (dev only, invoked via `cargo llvm-cov`)
+# Install: cargo install cargo-llvm-cov
+# Run:     cargo llvm-cov --workspace --all-features --fail-under-lines 90
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
