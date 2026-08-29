@@ -17,10 +17,14 @@ use std::sync::Arc;
 use redb::{Database, ReadableTable};
 
 use crate::cf::{
-    meta_key, TBL_ACTIVE_SNAPSHOTS, TBL_META, TBL_MULTIPART, TBL_READ_SET, TBL_STAGED_BLOBS,
-    TBL_TXN_STATE, TBL_VERSION_CHAINS, TBL_VERSIONS, TBL_WAL, TBL_WRITE_SET,
+    meta_key, TBL_ACTIVE_SNAPSHOTS, TBL_META, TBL_MULTIPART, TBL_READ_SET, TBL_RECORD_INDEX,
+    TBL_SCHEMA_INDEX, TBL_STAGED_BLOBS, TBL_TXN_STATE, TBL_VERSION_CHAINS, TBL_VERSIONS,
+    TBL_WAL, TBL_WRITE_SET,
 };
-use crate::txn_state::{BlobRecord, MultipartState, ReadSetEntry, TxnStateRecord, WriteSetEntry};
+use crate::txn_state::{
+    BlobRecord, MultipartState, ReadSetEntry, RecordIndexEntry, SchemaIndexEntry, StoredRecord,
+    TxnStateRecord, WriteSetEntry,
+};
 use crate::version_chain::{VersionChain, VersionEntry};
 use crate::version_index::VersionRecord;
 use crate::wal::WalRecord;
@@ -73,6 +77,8 @@ impl LocalStore {
                 let _ = txn.open_table(TBL_MULTIPART).map_err(redb_err)?;
                 let _ = txn.open_table(TBL_VERSION_CHAINS).map_err(redb_err)?;
                 let _ = txn.open_table(TBL_ACTIVE_SNAPSHOTS).map_err(redb_err)?;
+                let _ = txn.open_table(TBL_RECORD_INDEX).map_err(redb_err)?;
+                let _ = txn.open_table(TBL_SCHEMA_INDEX).map_err(redb_err)?;
                 let mut meta = txn.open_table(TBL_META).map_err(redb_err)?;
                 if meta.get(meta_key::GLOBAL_VERSION).map_err(redb_err)?.is_none() {
                     meta.insert(meta_key::GLOBAL_VERSION, 0u64).map_err(redb_err)?;
@@ -480,12 +486,19 @@ impl LocalStore {
 
     /// Prune (GC) entries strictly below `min_snapshot` that are not the newest.
     /// Returns (chains_visited, total_entries_removed).
+    /// `chains_visited` counts every chain GC iterated over, including ones
+    /// where nothing was pruned (e.g., when `min_snapshot` is below every
+    /// entry, or a single-entry chain). Callers (regression tests,
+    /// `gc::gc_version_chains`) rely on this — `chains_visited == 1`
+    /// means "we looked at the chain", not "we modified it".
     /// Implements invariant I8.
     pub fn gc_chains(&self, min_snapshot: u64) -> XtableResult<(usize, usize)> {
         let chains = self.iter_all_chains()?;
+        let mut visited = 0usize;
         let mut total_removed = 0usize;
         let mut to_write: Vec<(String, Vec<u8>)> = Vec::new();
         for (key, mut chain) in chains {
+            visited += 1;
             let removed = chain.prune_below(min_snapshot);
             if removed > 0 {
                 total_removed += removed;
@@ -494,7 +507,6 @@ impl LocalStore {
                 to_write.push((key, bytes));
             }
         }
-        let visited = to_write.len();
         if !to_write.is_empty() {
             self.with_write(|txn| {
                 let mut tbl = txn.open_table(TBL_VERSION_CHAINS).map_err(redb_err)?;
@@ -578,6 +590,180 @@ impl LocalStore {
             }
             Ok(n)
         })
+    }
+
+    // ===== Structured-data-space indexes =====
+
+    pub fn put_record_index(
+        &self,
+        space: &str,
+        table: &str,
+        record_id: &str,
+        entry: &RecordIndexEntry,
+    ) -> XtableResult<()> {
+        let bytes = bincode::serialize(entry).map_err(XtableError::from)?;
+        self.with_write(|txn| {
+            let mut tbl = txn.open_table(TBL_RECORD_INDEX).map_err(redb_err)?;
+            tbl.insert((space, table, record_id), bytes.as_slice())
+                .map_err(redb_err)?;
+            Ok(())
+        })
+    }
+
+    pub fn get_record_index(
+        &self,
+        space: &str,
+        table: &str,
+        record_id: &str,
+    ) -> XtableResult<Option<RecordIndexEntry>> {
+        self.with_read(|txn| {
+            let tbl = txn.open_table(TBL_RECORD_INDEX).map_err(redb_err)?;
+            match tbl.get((space, table, record_id)).map_err(redb_err)? {
+                Some(v) => {
+                    let rec: RecordIndexEntry =
+                        bincode::deserialize(v.value()).map_err(XtableError::from)?;
+                    Ok(Some(rec))
+                }
+                None => Ok(None),
+            }
+        })
+    }
+
+    /// Body-carrying variant of [`put_record_index`]. Stores the entry
+    /// alongside the JSON body so listing queries don't need to fetch
+    /// every record from the backend S3.
+    pub fn put_record_index_with_body(
+        &self,
+        space: &str,
+        table: &str,
+        record_id: &str,
+        entry: &RecordIndexEntry,
+        body: &serde_json::Value,
+    ) -> XtableResult<()> {
+        // Pre-serialize body to JSON text — bincode's serde integration
+        // does not reliably roundtrip `serde_json::Value`.
+        let body_json = serde_json::to_string(body).map_err(XtableError::from)?;
+        let entry_owned = entry.clone();
+        let bytes = bincode::serialize(&StoredRecord { entry: entry_owned, body_json }).map_err(XtableError::from)?;
+        self.with_write(|txn| {
+            let mut tbl = txn.open_table(TBL_RECORD_INDEX).map_err(redb_err)?;
+            tbl.insert((space, table, record_id), bytes.as_slice())
+                .map_err(redb_err)?;
+            Ok(())
+        })
+    }
+
+    /// Read both index entry and stored body. Tries the body-carrying
+    /// format first, falls back to the legacy format for compatibility.
+    pub fn get_record_index_with_body(
+        &self,
+        space: &str,
+        table: &str,
+        record_id: &str,
+    ) -> XtableResult<Option<(RecordIndexEntry, serde_json::Value)>> {
+        self.with_read(|txn| {
+            let tbl = txn.open_table(TBL_RECORD_INDEX).map_err(redb_err)?;
+            let raw = match tbl.get((space, table, record_id)).map_err(redb_err)? {
+                Some(v) => v.value().to_vec(),
+                None => return Ok(None),
+            };
+            if let Ok(s) = bincode::deserialize::<StoredRecord>(&raw) {
+                if s.body_json.is_empty() {
+                    return Ok(Some((s.entry, serde_json::Value::Null)));
+                }
+                let body: serde_json::Value =
+                    serde_json::from_str(&s.body_json).map_err(XtableError::from)?;
+                return Ok(Some((s.entry, body)));
+            }
+            if let Ok(entry) = bincode::deserialize::<RecordIndexEntry>(&raw) {
+                return Ok(Some((entry, serde_json::Value::Null)));
+            }
+            Err(XtableError::Storage("record index: decode failed".into()))
+        })
+    }
+
+    pub fn delete_record_index(&self, space: &str, table: &str, record_id: &str) -> XtableResult<()> {
+        self.with_write(|txn| {
+            let mut tbl = txn.open_table(TBL_RECORD_INDEX).map_err(redb_err)?;
+            tbl.remove((space, table, record_id)).map_err(redb_err)?;
+            Ok(())
+        })
+    }
+
+    /// Iterate all record index entries for a (space, table). Yields
+    /// (record_id, RecordIndexEntry) — caller filters by snapshot.
+    pub fn iter_record_index(
+        &self,
+        space: &str,
+        table: &str,
+    ) -> XtableResult<Vec<(String, RecordIndexEntry)>> {
+        let mut out = Vec::new();
+        self.with_read(|txn| {
+            let tbl = txn.open_table(TBL_RECORD_INDEX).map_err(redb_err)?;
+            for entry in tbl.iter().map_err(redb_err)? {
+                let (k, v) = entry.map_err(redb_err)?;
+                let (s, t, rid) = k.value();
+                if s == space && t == table {
+                    let rec: RecordIndexEntry =
+                        bincode::deserialize(v.value()).map_err(XtableError::from)?;
+                    out.push((rid.to_string(), rec));
+                }
+            }
+            Ok(())
+        })?;
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
+    pub fn put_schema_index(
+        &self,
+        space: &str,
+        name: &str,
+        entry: &SchemaIndexEntry,
+    ) -> XtableResult<()> {
+        let bytes = bincode::serialize(entry).map_err(XtableError::from)?;
+        self.with_write(|txn| {
+            let mut tbl = txn.open_table(TBL_SCHEMA_INDEX).map_err(redb_err)?;
+            tbl.insert((space, name), bytes.as_slice()).map_err(redb_err)?;
+            Ok(())
+        })
+    }
+
+    pub fn get_schema_index(
+        &self,
+        space: &str,
+        name: &str,
+    ) -> XtableResult<Option<SchemaIndexEntry>> {
+        self.with_read(|txn| {
+            let tbl = txn.open_table(TBL_SCHEMA_INDEX).map_err(redb_err)?;
+            match tbl.get((space, name)).map_err(redb_err)? {
+                Some(v) => {
+                    let rec: SchemaIndexEntry =
+                        bincode::deserialize(v.value()).map_err(XtableError::from)?;
+                    Ok(Some(rec))
+                }
+                None => Ok(None),
+            }
+        })
+    }
+
+    pub fn iter_schema_index(&self, space: &str) -> XtableResult<Vec<(String, SchemaIndexEntry)>> {
+        let mut out = Vec::new();
+        self.with_read(|txn| {
+            let tbl = txn.open_table(TBL_SCHEMA_INDEX).map_err(redb_err)?;
+            for entry in tbl.iter().map_err(redb_err)? {
+                let (k, v) = entry.map_err(redb_err)?;
+                let (s, n) = k.value();
+                if s == space {
+                    let rec: SchemaIndexEntry =
+                        bincode::deserialize(v.value()).map_err(XtableError::from)?;
+                    out.push((n.to_string(), rec));
+                }
+            }
+            Ok(())
+        })?;
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
     }
 }
 
@@ -716,5 +902,30 @@ mod tests {
         let only_t1 = store.iter_write_set("T1").unwrap();
         assert_eq!(only_t1.len(), 1);
         assert_eq!(only_t1[0].0, "k1");
+    }
+
+    #[test]
+    fn record_index_with_body_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let store = LocalStore::open_path(&tmp.path().join("xt.redb")).unwrap();
+        let entry = RecordIndexEntry {
+            commit_version: 42,
+            deleted: false,
+            backend_key: "k".into(),
+            schema_version: 3,
+            txn_id: "TX".into(),
+            updated_ms: 1_700_000_000_000,
+        };
+        let body = serde_json::json!({"a": 1, "b": "hi", "c": [true, false]});
+        store.put_record_index_with_body("s", "t", "r", &entry, &body).unwrap();
+        let (got_entry, got_body) = store.get_record_index_with_body("s", "t", "r").unwrap().unwrap();
+        assert_eq!(got_entry, entry);
+        assert_eq!(got_body, body);
+
+        // iter_record_index decodes only the entry (body dropped by serde).
+        let iter = store.iter_record_index("s", "t").unwrap();
+        assert_eq!(iter.len(), 1);
+        assert_eq!(iter[0].0, "r");
+        assert_eq!(iter[0].1.commit_version, 42);
     }
 }

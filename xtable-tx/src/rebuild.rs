@@ -17,7 +17,7 @@ use chrono::Utc;
 use tracing::{info, warn};
 
 use xtable_core::ObjectKey;
-use xtable_storage::{LocalStore, VersionRecord};
+use xtable_storage::{LocalStore, VersionEntry, VersionRecord};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RebuildReport {
@@ -77,23 +77,35 @@ pub async fn rebuild(
     // Build version records + max global version.
     let mut max_v: u64 = 0;
     let mut updates: Vec<(ObjectKey, VersionRecord)> = Vec::with_capacity(per_key.len());
+    let mut chain_entries: Vec<(String, VersionEntry)> = Vec::with_capacity(per_key.len());
     for (key, (v, etag, size, backend_key)) in per_key {
         max_v = max_v.max(v);
         let now_ms = Utc::now().timestamp_millis();
         let rec = VersionRecord {
             latest_version: xtable_core::Version(v),
-            latest_etag: etag,
-            latest_backend_key: backend_key,
+            latest_etag: etag.clone(),
+            latest_backend_key: backend_key.clone(),
             last_writer_txn_id: String::new(),
             tombstone: false,
             size,
             last_modified_unix_ms: now_ms,
         };
         updates.push((ObjectKey::new(&key), rec));
+        // V1 fix: also rebuild the MVCC chain. Reads via read_chain /
+        // read_at_snapshot need this; otherwise after a cold rebuild the
+        // store knows the latest version but has no entry on the chain,
+        // so every read returns None even for committed data.
+        chain_entries.push((
+            key.clone(),
+            VersionEntry::new(v, etag, backend_key, String::new(), size),
+        ));
         report.versions_rebuilt += 1;
     }
     if !updates.is_empty() {
         store.put_versions_bulk(&updates)?;
+    }
+    if !chain_entries.is_empty() {
+        store.append_chain_entries_bulk(&chain_entries)?;
     }
 
     // Set global_version counter so future commits allocate > max_v.

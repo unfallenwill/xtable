@@ -27,7 +27,8 @@ use xtable_backend::{BackendClient, BackendError};
 use xtable_core::headers::TxnStatus;
 use xtable_core::{ObjectKey, TxnId, Version, XtableError, XtableResult};
 use xtable_storage::{
-    BlobRecord, LocalStore, ReadSetEntry, TxnStateRecord, WalRecord, WriteSetEntry,
+    BlobRecord, LocalStore, ReadSetEntry, TxnStateRecord, VersionRecord, WalRecord,
+    WriteSetEntry,
 };
 
 use crate::error::TxnError;
@@ -37,6 +38,31 @@ use crate::error::TxnError;
 pub struct CommitOutcome {
     pub commit_version: u64,
 }
+
+/// Per-write payload handed to post-commit hooks.
+#[derive(Debug, Clone)]
+pub struct CommitWrite {
+    pub key: String,
+    pub commit_version: u64,
+    pub deleted: bool,
+    pub size: u64,
+}
+
+/// Event delivered to post-commit hooks after a successful commit.
+/// `writes` lists every key the txn appended to the chain, in commit order.
+#[derive(Debug, Clone)]
+pub struct CommitEvent {
+    pub txn_id: String,
+    pub commit_version: u64,
+    pub writes: Vec<CommitWrite>,
+}
+
+/// Sync post-commit hook signature. Hooks run inside the commit critical
+/// section AFTER chain-append + WAL Committed have succeeded. They run
+/// synchronously so a failure can be logged; they cannot fail the commit
+/// (the chain is already published). Implementation MUST be fast and
+/// non-blocking on IO.
+pub type PostCommitHook = Arc<dyn Fn(&CommitEvent) + Send + Sync>;
 
 /// Transaction coordinator.
 #[derive(Clone)]
@@ -52,6 +78,8 @@ pub struct TxnCoordinator {
     /// the validate → upload window leaves room for concurrent commits on
     /// the same key to interleave and silently overwrite each other.
     commit_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Post-commit hooks (e.g., index maintenance for the structured-data-space layer).
+    post_commit_hooks: Arc<std::sync::RwLock<Vec<PostCommitHook>>>,
 }
 
 impl std::fmt::Debug for TxnCoordinator {
@@ -78,6 +106,7 @@ impl TxnCoordinator {
             // critical section at a time. redb still provides per-key
             // atomicity at the storage layer.
             commit_lock: Arc::new(tokio::sync::Mutex::new(())),
+            post_commit_hooks: Arc::new(std::sync::RwLock::new(Vec::new())),
         }
     }
 
@@ -87,6 +116,22 @@ impl TxnCoordinator {
 
     pub fn backend(&self) -> &BackendClient {
         &self.backend
+    }
+
+    /// Register a post-commit hook. Returns the registration index so the
+    /// caller can deregister later (rarely needed in production).
+    pub fn register_post_commit_hook(&self, hook: PostCommitHook) -> usize {
+        let mut hooks = self.post_commit_hooks.write().expect("hooks poisoned");
+        let idx = hooks.len();
+        hooks.push(hook);
+        idx
+    }
+
+    fn fire_post_commit_hooks(&self, ev: &CommitEvent) {
+        let hooks = self.post_commit_hooks.read().expect("hooks poisoned");
+        for h in hooks.iter() {
+            h(ev);
+        }
     }
 
     /// Allocate a ULID-based transaction id.
@@ -283,9 +328,16 @@ impl TxnCoordinator {
             upload_keys: alloc_versions.iter().map(|(k, _)| k.clone()).collect(),
         })?;
 
-        // 5. Upload all bodies to backend S3 in parallel.
+        // 5. Upload all bodies to a per-txn staging path in S3, NOT to the
+        // final key paths. This is the V3 fix: if any upload fails, we can
+        // abort cleanly by deleting staging copies without ever having
+        // overwritten the live (T0) data. On full success we promote each
+        // staging object to its final key.
         let upload_keys = Arc::new(sorted_keys);
-        let upload_results = self.upload_all(txn_id, &write_entries, &alloc_versions, upload_keys.clone()).await;
+        let staging_prefix = format!("xtable-txn-staging/{}/", txn_id);
+        let upload_results = self
+            .upload_all(txn_id, &write_entries, &alloc_versions, upload_keys.clone(), &staging_prefix)
+            .await;
 
         let mut uploaded: Vec<String> = Vec::new();
         let mut failed: Vec<(String, String)> = Vec::new();
@@ -301,33 +353,17 @@ impl TxnCoordinator {
         txn.alloc_versions = alloc_versions.clone();
         self.store.put_txn_state(txn_id, &txn)?;
 
-        // 6. Compensating delete if any uploads failed.
-// V3 fix: only delete uploaded key if its chain's latest_commit_version is
-// still OUR alloc_version (i.e., no other commit has overwritten it).
-// Otherwise, another commit has already published a newer value — deleting
-// the backend object would destroy that newer data.
+        // 6. If any uploads failed, abort cleanly: delete every staging
+        // copy we did manage to write, leave the live backend untouched,
+        // and never append the chain entry.
         if !failed.is_empty() {
-            warn!(txn = %txn_id, failed_keys = ?failed, "uploads failed; compensating");
-            for (key, alloc_v) in &alloc_versions {
+            warn!(txn = %txn_id, failed_keys = ?failed, "uploads failed; cleaning up staging copies");
+            for (key, _alloc_v) in &alloc_versions {
                 if !uploaded.contains(key) {
                     continue;
                 }
-                // Check: is our uploaded alloc_version still the chain's latest?
-                let current_latest = self.store
-                    .read_chain(key)
-                    .map(|c| c.latest_commit_version())
-                    .unwrap_or(0);
-                if current_latest == *alloc_v {
-                    // Safe to delete — no one else has committed a newer version.
-                    let _ = self.backend.delete_object(&ObjectKey::new(key)).await;
-                } else {
-                    warn!(
-                        key = %key,
-                        our_alloc = alloc_v,
-                        current_latest,
-                        "skipping compensation delete: a newer version exists"
-                    );
-                }
+                let staging_key = format!("{}{}", staging_prefix, key);
+                let _ = self.backend.delete_object(&ObjectKey::new(&staging_key)).await;
             }
             self.store.append_wal(&WalRecord::Aborted {
                 txn_id: txn_id.to_string(),
@@ -336,6 +372,50 @@ impl TxnCoordinator {
             txn.status = TxnStatus::Aborted;
             self.store.put_txn_state(txn_id, &txn)?;
             return Err(XtableError::Backend(format!("txn {} aborted: upload failures", txn_id)));
+        }
+
+        // 6b. All staging uploads succeeded — promote each to its final
+        // key. For deleted=true entries, the staging delete now takes
+        // effect on the live key. For normal entries, we copy the staged
+        // body to the final key (preserving xtable metadata), then delete
+        // the staging copy.
+        for (key, alloc_v) in &alloc_versions {
+            let staging_key = format!("{}{}", staging_prefix, key);
+            let staging_obj = ObjectKey::new(&staging_key);
+            let final_obj = ObjectKey::new(key);
+            let write_entry = write_entries.iter().find(|(kk, _)| kk == key);
+            let is_deleted = write_entry.map(|(_, e)| e.deleted).unwrap_or(false);
+
+            if is_deleted {
+                // V10: actually delete the live key.
+                let _ = self.backend.delete_object(&final_obj).await;
+            } else {
+                match self.backend.get_object(&staging_obj).await {
+                    Ok(got) => {
+                        let mut meta = HashMap::new();
+                        meta.insert(
+                            "x-amz-meta-xtable-version".to_string(),
+                            alloc_v.to_string(),
+                        );
+                        meta.insert(
+                            "x-amz-meta-xtable-txn-id".to_string(),
+                            txn_id.to_string(),
+                        );
+                        let _ = self
+                            .backend
+                            .put_object(&final_obj, got.bytes, None, meta)
+                            .await;
+                    }
+                    Err(_) => {
+                        // We just uploaded this; if it's gone now the
+                        // backend is in trouble. Don't overwrite live
+                        // data speculatively.
+                        warn!(key = %key, "could not fetch staging body for promotion");
+                    }
+                }
+            }
+            // Clean up staging copy regardless.
+            let _ = self.backend.delete_object(&staging_obj).await;
         }
 
         // 7. V7 fix: WAL Committing already written above (before uploads).
@@ -369,6 +449,33 @@ impl TxnCoordinator {
         }
         self.store.append_chain_entries_bulk(&entries)?;
 
+        // V4 fix: keep TBL_VERSIONS in sync with the chain. Even though
+        // OCC validation now reads the chain directly, TBL_VERSIONS is
+        // still load-bearing for compensation (V3 — needs the prior
+        // backend_key to restore on partial-failure aborts) and for the
+        // rebuild path (single source of truth per object).
+        let now_ms = Utc::now().timestamp_millis();
+        let mut version_updates: Vec<(ObjectKey, VersionRecord)> =
+            Vec::with_capacity(alloc_versions.len());
+        for (k, v) in &alloc_versions {
+            let write_entry = write_entries.iter().find(|(kk, _)| kk == k);
+            let is_deleted = write_entry.map(|(_, e)| e.deleted).unwrap_or(false);
+            let size = write_entry.map(|(_, e)| e.size).unwrap_or(0);
+            version_updates.push((
+                ObjectKey::new(k),
+                VersionRecord {
+                    latest_version: Version(*v),
+                    latest_etag: String::new(),
+                    latest_backend_key: k.clone(),
+                    last_writer_txn_id: txn_id.to_string(),
+                    tombstone: is_deleted,
+                    size,
+                    last_modified_unix_ms: now_ms,
+                },
+            ));
+        }
+        self.store.put_versions_bulk(&version_updates)?;
+
         let commit_version = alloc_versions.iter().map(|(_, v)| *v).max().unwrap_or(txn.snapshot_version);
 
         // 9. Mark committed (WAL + TxnState).
@@ -383,6 +490,24 @@ impl TxnCoordinator {
         })?;
         txn.status = TxnStatus::Committed;
         self.store.put_txn_state(txn_id, &txn)?;
+
+        // 9b. Fire post-commit hooks. After this point observers can
+        // reconcile their own indexes (record / schema index in the
+        // structured-data-space layer).
+        let writes = entries
+            .iter()
+            .map(|(k, e)| CommitWrite {
+                key: k.clone(),
+                commit_version: e.commit_version,
+                deleted: e.deleted,
+                size: e.size,
+            })
+            .collect::<Vec<_>>();
+        self.fire_post_commit_hooks(&CommitEvent {
+            txn_id: txn_id.to_string(),
+            commit_version,
+            writes,
+        });
 
         // MVCC: release the snapshot pin so GC can prune old versions.
         let _ = self.store.unregister_snapshot(txn.snapshot_version);
@@ -476,6 +601,10 @@ impl TxnCoordinator {
     /// Upload all staged writes to the backend S3 in parallel.
     /// For `deleted=true` entries (V10 fix), call DeleteObject on the backend
     /// instead of PutObject.
+    /// `key_prefix` (e.g. `"xtable-txn-staging/{txn_id}/"`) is prepended to
+    /// every S3 key so callers can stage writes to a side location and
+    /// promote them only after the whole txn is confirmed. Empty string
+    /// means "publish to final key path" (legacy behavior).
     /// Returns per-key results for compensation on failure.
     async fn upload_all(
         &self,
@@ -483,6 +612,7 @@ impl TxnCoordinator {
         write_entries: &[(String, WriteSetEntry)],
         alloc_versions: &[(String, u64)],
         upload_keys: Arc<Vec<String>>,
+        key_prefix: &str,
     ) -> Vec<(String, Result<(), BackendError>)> {
         let mut futures: FuturesUnordered<Pin<Box<dyn std::future::Future<Output = (String, Result<(), BackendError>)> + Send>>> = FuturesUnordered::new();
         for (key, entry) in write_entries {
@@ -495,12 +625,13 @@ impl TxnCoordinator {
             let key_for_task = key_str.clone();
             let deleted = entry.deleted;
             let txn_id_owned = txn_id.to_string();
+            let s3_key = format!("{}{}", key_prefix, key_for_task);
 
             if deleted {
                 // V10: transactional delete → DeleteObject (NOT PutObject with empty body).
                 let fut = async move {
                     let _permit = permit_sem.acquire_owned().await.expect("semaphore closed");
-                    let res = backend.delete_object(&ObjectKey::new(&key_for_task)).await;
+                    let res = backend.delete_object(&ObjectKey::new(&s3_key)).await;
                     (key_for_task, res.map(|_| ()))
                 };
                 futures.push(Box::pin(fut));
@@ -536,7 +667,7 @@ impl TxnCoordinator {
                 );
                 let res = backend
                     .put_object(
-                        &ObjectKey::new(&key_for_task),
+                        &ObjectKey::new(&s3_key),
                         body,
                         entry.content_type.as_deref(),
                         meta,
