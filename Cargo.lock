@@ -3665,6 +3665,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "xtable-schema"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bincode",
+ "chrono",
+ "futures",
+ "hex",
+ "proptest",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "ulid",
+ "xtable-backend",
+ "xtable-core",
+ "xtable-storage",
+ "xtable-tx",
+]
+
+[[package]]
 name = "xtable-server"
 version = "0.1.0"
 dependencies = [
@@ -3678,6 +3704,8 @@ dependencies = [
  "metrics",
  "s3s",
  "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
  "toml",
  "tower",
@@ -3688,6 +3716,7 @@ dependencies = [
  "xtable-backend",
  "xtable-core",
  "xtable-s3",
+ "xtable-schema",
  "xtable-storage",
  "xtable-tx",
 ]
@@ -3703,6 +3732,7 @@ dependencies = [
  "proptest",
  "redb",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 1.0.69",
