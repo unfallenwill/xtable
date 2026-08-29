@@ -16,6 +16,7 @@ xtable-backend = { path = "../xtable-backend" }
 xtable-auth = { path = "../xtable-auth" }
 xtable-s3 = { path = "../xtable-s3" }
 xtable-tx = { path = "../xtable-tx" }
+xtable-schema = { path = "../xtable-schema" }
 
 tokio = { workspace = true }
 axum = { workspace = true }
@@ -31,5 +32,12 @@ toml = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 async-trait = { workspace = true }
 s3s = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tower = { workspace = true }

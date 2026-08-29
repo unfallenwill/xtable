@@ -3,3 +3,4 @@
 pub mod app;
 pub mod config;
 pub mod shutdown;
+pub mod structured;

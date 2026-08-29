@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use xtable_auth::{CredentialStore, EdgeAuth};
 use xtable_backend::BackendClient;
+use xtable_schema::StructuredSpace;
 use xtable_storage::LocalStore;
 use xtable_tx::TxnCoordinator;
 
@@ -14,6 +15,7 @@ pub struct AppState {
     pub backend: Arc<BackendClient>,
     pub auth: Arc<EdgeAuth>,
     pub txn: Arc<TxnCoordinator>,
+    pub structured: Arc<StructuredSpace>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -41,12 +43,18 @@ impl AppState {
             config.storage.staged_body_spill_dir.clone(),
             config.txn.commit_upload_concurrency,
         ));
+        let structured = Arc::new(StructuredSpace::new(
+            Arc::clone(&txn),
+            store.clone(),
+            Arc::clone(&backend_arc),
+        ));
         Self {
             config: cfg,
             store,
             backend: backend_arc,
             auth,
             txn,
+            structured,
         }
     }
 }
