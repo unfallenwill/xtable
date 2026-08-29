@@ -18,6 +18,7 @@ struct MockS3 {
 }
 
 #[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
 struct MultipartState {
     pub key: String,
     pub upload_id: String,

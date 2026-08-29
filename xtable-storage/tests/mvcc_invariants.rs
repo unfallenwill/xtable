@@ -54,7 +54,7 @@ proptest! {
                 prop_assert!(w[0] < w[1], "chain not strictly monotonic: {:?}", versions);
             }
             Ok(())
-        });
+        })?;
     }
 }
 
@@ -95,7 +95,7 @@ proptest! {
                 prop_assert!(g.commit_version <= snap, "snapshot returned newer entry");
             }
             Ok(())
-        });
+        })?;
     }
 }
 
@@ -139,7 +139,7 @@ proptest! {
             // A's recorded version_at_read != current → conflict.
             prop_assert_ne!(chain.latest_commit_version(), version_at_read);
             Ok(())
-        });
+        })?;
     }
 }
 
@@ -180,7 +180,7 @@ proptest! {
                 }
             }
             Ok(())
-        });
+        })?;
     }
 }
 
@@ -229,7 +229,7 @@ proptest! {
             }
             prop_assert_eq!(wal_before.len(), wal_after.len());
             Ok(())
-        });
+        })?;
     }
 }
 
@@ -254,7 +254,7 @@ proptest! {
             prop_assert_eq!(chain_after.entries.len(), 1, "GC should leave exactly 1 entry");
             prop_assert_eq!(chain_after.entries[0].commit_version, before_latest);
             Ok(())
-        });
+        })?;
     }
 }
 
@@ -282,7 +282,7 @@ proptest! {
             }
             // Register a snapshot at `pin`.
             store.register_snapshot(pin).unwrap();
-            let (visited, removed) = store.gc_chains(pin).unwrap();
+            let (visited, _removed) = store.gc_chains(pin).unwrap();
             prop_assert_eq!(visited, 1);
             let chain_after = store.read_chain("k").unwrap();
             // After GC, all entries with commit_version < pin should be removed.
@@ -297,7 +297,7 @@ proptest! {
                 prop_assert!(g.commit_version <= pin);
             }
             Ok(())
-        });
+        })?;
     }
 }
 
@@ -307,7 +307,7 @@ proptest! {
 
 proptest! {
     #[test]
-    fn prop_chain_no_duplicate_version(n in 2usize..20) {
+    fn prop_chain_no_duplicate_version(_n in 2usize..20) {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {
             let store = make_store();
@@ -317,7 +317,7 @@ proptest! {
             let res = store.append_chain_entry("k", &entry(v, "k", 10));
             prop_assert!(res.is_err(), "duplicate commit_version should be rejected");
             Ok(())
-        });
+        })?;
     }
 }
 
@@ -343,6 +343,6 @@ proptest! {
             prop_assert!(got.is_some());
             prop_assert_eq!(got.unwrap().size, body_size);
             Ok(())
-        });
+        })?;
     }
 }

@@ -40,7 +40,7 @@ async fn unit_v4_stage_records_chain_version_as_version_at_read() {
     // 1. Pre-populating the chain with a version-5 entry.
     // 2. stage() must record version_at_read=5.
     let (_coord, store, _tmp) = build().await;
-    let key = ObjectKey::new("k");
+    let _key = ObjectKey::new("k");
     store
         .append_chain_entry("k", &VersionEntry::new(5, "e5".into(), "k".into(), "T0".into(), 10))
         .unwrap();
@@ -243,7 +243,7 @@ async fn unit_v10_delete_flag_creates_tombstone() {
 
 #[tokio::test]
 async fn unit_v10_write_set_entry_preserves_deleted_flag() {
-    let store = LocalStore::open_path(
+    let _store = LocalStore::open_path(
         &TempDir::new().unwrap().path().join("xt.redb"),
     ).unwrap();
     let mut entry = xtable_storage::WriteSetEntry {

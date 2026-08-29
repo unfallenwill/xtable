@@ -22,7 +22,7 @@ pub struct MockS3 {
 }
 
 #[derive(Clone, Default)]
-struct MultipartState {
+pub struct MultipartState {
     key: String,
     parts: Vec<(i32, Vec<u8>)>,
 }

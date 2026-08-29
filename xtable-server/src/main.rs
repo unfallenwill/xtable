@@ -13,7 +13,6 @@ use clap::Parser;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-use xtable_auth::verify_request as xtable_verify_request;
 
 use xtable_auth::StaticCredential;
 use xtable_backend::BackendClient;
@@ -156,7 +155,6 @@ fn spawn_gc(state: xtable_server::app::AppState) {
 }
 
 fn build_router(state: xtable_server::app::AppState) -> axum::Router {
-    use axum::error_handling::HandleError;
     use axum::routing::get;
 
     // V15 fix: SigV4 authentication middleware. All S3 + transactional
@@ -190,10 +188,15 @@ fn build_router(state: xtable_server::app::AppState) -> axum::Router {
     let s3_direct = xtable_s3::direct_router::build_direct_router(state.auth.clone())
         .with_state(xtable_s3::direct_router::DirectRouterState(s3_svc));
 
+    // Structured-data-space routes under /v1.
+    let state_arc = std::sync::Arc::new(state.clone());
+    let structured_routes = xtable_server::structured::router().with_state(state_arc);
+
     axum::Router::new()
         .merge(admin)
         .merge(txn_routes)
         .merge(s3_direct)
+        .merge(structured_routes)
         .with_state(state)
         .layer(auth_layer)
 }
@@ -215,13 +218,6 @@ async fn auth_middleware(
     next.run(req).await
 }
 
-async fn handle_s3_error(err: s3s::HttpError) -> http::Response<s3s::Body> {
-    tracing::error!(?err, "s3 service error");
-    http::Response::builder()
-        .status(http::StatusCode::INTERNAL_SERVER_ERROR)
-        .body(s3s::Body::from("Internal Server Error".to_string()))
-        .unwrap()
-}
 
 // ----- Transactional routes -----
 

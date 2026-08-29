@@ -156,7 +156,7 @@ async fn s3_raw(
 }
 
 async fn raw_signed(
-    base: &str,
+    _base: &str,
     ak: &str,
     sk: &str,
     method: &str,

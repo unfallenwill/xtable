@@ -126,7 +126,7 @@ proptest! {
                 last = v;
             }
             Ok(())
-        });
+        })?;
     }
 }
 
@@ -166,7 +166,7 @@ proptest! {
                 prop_assert_eq!(rec.latest_version.as_u64(), *v);
             }
             Ok(())
-        });
+        })?;
     }
 }
 
@@ -194,7 +194,7 @@ proptest! {
                 last = seq;
             }
             Ok(())
-        });
+        })?;
     }
 }
 
@@ -241,7 +241,6 @@ async fn inv_commit_replay_returns_same_outcome() {
 #[tokio::test]
 async fn inv_gc_sweeps_stale_txn_but_keeps_recent() {
     use chrono::Utc;
-    use xtable_core::headers::TxnStatus;
     use xtable_storage::TxnStateRecord;
 
     let (_coord, store, _tmp) = build_for_test().await;
