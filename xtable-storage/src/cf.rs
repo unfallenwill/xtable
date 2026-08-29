@@ -47,6 +47,19 @@ pub const TBL_STAGED_BLOBS: TableDefinition<&str, &[u8]> = TableDefinition::new(
 /// `multipart`: upload_id → bincode MultipartState.
 pub const TBL_MULTIPART: TableDefinition<&str, &[u8]> = TableDefinition::new("xtable.multipart");
 
+/// Record index for structured-data-space layer.
+/// Key = (space, table, record_id) — bincode-encoded [`RecordIndexEntry`].
+/// Maintained by post-commit hooks; consulted by reads/queries that don't
+/// want to walk every S3 object.
+pub const TBL_RECORD_INDEX: TableDefinition<(&str, &str, &str), &[u8]> =
+    TableDefinition::new("xtable.record_index");
+
+/// Schema index for structured-data-space layer.
+/// Key = (space, schema_name) → bincode [`SchemaIndexEntry`].
+/// Tracks the latest versioned schema document.
+pub const TBL_SCHEMA_INDEX: TableDefinition<(&str, &str), &[u8]> =
+    TableDefinition::new("xtable.schema_index");
+
 /// Meta table singleton keys.
 pub mod meta_key {
     pub const GLOBAL_VERSION: &str = "global_version";

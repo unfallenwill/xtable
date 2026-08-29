@@ -12,7 +12,10 @@ pub mod version_index;
 pub mod wal;
 
 pub use store::LocalStore;
-pub use txn_state::{BlobRecord, MultipartState, ReadSetEntry, TxnStateRecord, WriteSetEntry};
+pub use txn_state::{
+    BlobRecord, MultipartState, ReadSetEntry, RecordIndexEntry, SchemaIndexEntry, StoredRecord,
+    TxnStateRecord, WriteSetEntry,
+};
 pub use version_chain::{VersionChain, VersionEntry};
 pub use version_index::VersionRecord;
 pub use wal::{encode_seq, WalRecord};

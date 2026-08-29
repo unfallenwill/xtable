@@ -74,6 +74,48 @@ pub struct MultipartState {
     pub txn_id: Option<String>,        // None = non-transactional
 }
 
+/// Record index entry — used by structured-data-space to enumerate records
+/// without scanning the full object store. Holds enough state to reconstruct
+/// a snapshot view at any commit_version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordIndexEntry {
+    /// The commit_version at which this index entry became valid (= commit
+    /// version of the chain append). Monotonic per (space, table, record).
+    pub commit_version: u64,
+    /// Tombstone flag — write removed the record.
+    pub deleted: bool,
+    /// Backend S3 key holding the record's JSON body.
+    pub backend_key: String,
+    /// Schema version this record conforms to.
+    pub schema_version: u32,
+    /// Txn that produced this entry.
+    pub txn_id: String,
+    pub updated_ms: i64,
+}
+
+/// Schema index entry — latest known schema document for a (space, name).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchemaIndexEntry {
+    /// Latest schema version registered (starts at 1).
+    pub latest_version: u32,
+    /// Backend S3 key of the latest schema document. Body is JSON Schema.
+    pub latest_backend_key: String,
+    pub registered_ms: i64,
+}
+
+/// Internal on-disk shape of a `TBL_RECORD_INDEX` row: the index meta plus
+/// an inline copy of the record's JSON body (serialized as a string of
+/// JSON text — bincode serde does not reliably roundtrip `serde_json::Value`).
+/// The body is included so list / query operations don't need to round-trip
+/// the backend for every row in v1; once secondary indexes exist the body
+/// can be lazily fetched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredRecord {
+    pub entry: RecordIndexEntry,
+    /// Pre-serialized JSON text of the body. Empty string = tombstone.
+    pub body_json: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
