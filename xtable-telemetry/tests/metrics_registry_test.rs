@@ -37,6 +37,7 @@ async fn all_instruments_registered_and_recording() {
     m.http_active_requests.add(1, &[]);
     m.txn_commit_total.add(1, &[KeyValue::new("outcome", "ok")]);
     m.txn_ssi_conflict_total.add(1, &[]);
+    m.process_runtime_uptime.add(42, &[]);
 
     tokio::time::sleep(Duration::from_millis(150)).await;
     let names: std::collections::HashSet<String> = exporter
@@ -55,6 +56,7 @@ async fn all_instruments_registered_and_recording() {
         "http.server.active_requests",
         "txn.commit.count",
         "txn.ssi.conflict.count",
+        "process.runtime.uptime",
     ] {
         assert!(names.contains(expected), "missing instrument {expected}");
     }

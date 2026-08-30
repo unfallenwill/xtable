@@ -99,6 +99,8 @@ pub struct Metrics {
     pub process_runtime_memory_heap: UpDownCounter<i64>,
     /// Number of CPU cores available to the process.
     pub process_runtime_cpu_count: UpDownCounter<i64>,
+    /// Process uptime since boot, in seconds (OTel semconv counter).
+    pub process_runtime_uptime: Counter<u64>,
 }
 
 impl Metrics {
@@ -252,6 +254,11 @@ impl Metrics {
             process_runtime_cpu_count: meter
                 .i64_up_down_counter("process.runtime.cpu.count")
                 .with_description("Number of CPU cores available to the process")
+                .build(),
+            process_runtime_uptime: meter
+                .u64_counter("process.runtime.uptime")
+                .with_description("Process uptime since boot")
+                .with_unit("s")
                 .build(),
         }
     }
