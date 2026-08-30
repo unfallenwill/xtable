@@ -1,24 +1,29 @@
 //! Telemetry init: layered subscriber + propagator + provider glue.
 //!
-//! Wiring breakdown:
-//! 1. `install_subscriber` returns a layered `tracing_subscriber`
-//!    with an OTLP trace layer (one filter per layer), a stdout JSON
-//!    layer (another filter), and a default `RUST_LOG`-aware EnvFilter
-//!    as the base filter. It does **not** call `try_init` — the caller
-//!    decides when to install the subscriber globally.
-//! 2. `install_log_provider` accepts an existing subscriber and adds
-//!    the OTel appender bridge as a new layer; it also does **not**
-//!    call `try_init`.
-//! 3. `init` orchestrates everything: builds the resource, the three
-//!    providers (tracer / meter / log), chains the layers via the two
-//!    builders above, installs them and the W3C TraceContext + W3C
-//!    Baggage propagators (composed together), then calls `try_init`
-//!    exactly once on the combined subscriber and returns a
-//!    `TelemetryGuard` that owns the providers and drains them on
-//!    `Drop`.
+//! Two subscriber shapes:
+//! * `install_otel_subscriber` — OTLP trace layer only (no stdout).
+//!   Used when OTel export is enabled.
+//! * `install_stdout_subscriber` — JSON stdout layer only. Used when
+//!   OTel is disabled so logs remain visible to operators.
 //!
-//! Returns `Ok(None)` when no OTLP endpoint is configured (telemetry
-//! disabled) — callers can wire it in unconditionally with
+//! Both build a `tracing_subscriber` but neither calls `try_init` —
+//! the caller decides when to install the subscriber globally.
+//!
+//! `install_log_provider` accepts an existing subscriber and adds the
+//! OTel appender bridge as a new layer; it also does **not** call
+//! `try_init`.
+//!
+//! `init` orchestrates everything: builds the resource, the three
+//! providers (tracer / meter / log) when OTel is enabled, chains the
+//! layers via the two builders above, installs them and the W3C
+//! TraceContext + W3C Baggage propagators (composed together), then
+//! calls `try_init` exactly once on the combined subscriber and
+//! returns a `TelemetryGuard` that owns the providers and drains
+//! them on `Drop`.
+//!
+//! Returns `Ok(None)` when no OTLP endpoint is configured — a
+//! stdout-only JSON subscriber is installed so logs remain visible.
+//! Callers can wire it in unconditionally with
 //! `let _guard = telemetry::init(&cfg)?;`.
 
 use anyhow::Context;
@@ -38,13 +43,11 @@ use crate::providers::{build_meter_provider, build_tracer_provider, install_log_
 use crate::resource::build_resource;
 use crate::shutdown::TelemetryGuard;
 
-/// Build the layered `tracing_subscriber` stack.
+/// Build the OTel-only `tracing_subscriber` stack.
 ///
-/// The returned subscriber is composed of:
-///   * a default `EnvFilter` (honours `RUST_LOG`) for the base registry
-///   * an OTLP trace layer (its own `EnvFilter`) that ships spans via
-///     `tracing_opentelemetry`
-///   * a JSON stdout layer (its own `EnvFilter`) for human inspection
+/// Ships spans via `tracing_opentelemetry` to the provided
+/// `SdkTracerProvider`. Stdout is intentionally silent — production
+/// log volume stays bounded by collector ingest.
 ///
 /// Every layer carries its own filter, per spec §5.3 — this lets ops
 /// tune the OTLP volume independently of stdout volume without a
@@ -52,7 +55,7 @@ use crate::shutdown::TelemetryGuard;
 ///
 /// The function does **not** call `try_init`; the caller chooses when
 /// (and whether) to install it as the global default.
-pub fn install_subscriber(
+pub fn install_otel_subscriber(
     cfg: &TelemetryConfig,
     tracer_provider: &SdkTracerProvider,
 ) -> impl Subscriber + for<'a> LookupSpan<'a> {
@@ -66,6 +69,26 @@ pub fn install_subscriber(
     let otel_layer = tracing_opentelemetry::layer()
         .with_tracer(tracer)
         .with_filter(env_filter_for_layer(Layer::OtlpTrace));
+
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with(otel_layer)
+}
+
+/// Build the stdout-only `tracing_subscriber` stack.
+///
+/// Used when OTel export is disabled. Writes JSON to stdout with the
+/// `Layer::Stdout` filter.
+///
+/// The function does **not** call `try_init`; the caller chooses when
+/// (and whether) to install it as the global default.
+pub fn install_stdout_subscriber(
+    cfg: &TelemetryConfig,
+) -> impl Subscriber + for<'a> LookupSpan<'a> {
+    let _ = cfg;
     let fmt_layer = tracing_subscriber::fmt::layer()
         .json()
         .with_current_span(true)
@@ -77,7 +100,6 @@ pub fn install_subscriber(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
-        .with(otel_layer)
         .with(fmt_layer)
 }
 
@@ -118,23 +140,31 @@ where
 /// `opentelemetry::propagation`) before handing it to
 /// `global::set_text_map_propagator`.
 pub fn init(cfg: &TelemetryConfig) -> anyhow::Result<Option<TelemetryGuard>> {
-    // Telemetry is opt-in: bail early when no endpoint is configured.
-    let endpoint = match cfg.endpoint.as_deref() {
-        Some(e) if !e.trim().is_empty() => e,
-        _ => return Ok(None),
-    };
-
     // W3C TraceContext + W3C Baggage, composed into a single global
-    // propagator. The brief's snippet had a placeholder block here that
-    // constructed a propagator and immediately dropped it; we replace
-    // it with a real composite that actually exercises BaggagePropagator
-    // (spec §12 requires both TraceContext AND Baggage headers to be
-    // propagated across service boundaries).
+    // propagator. Installed unconditionally so the HTTP layer can
+    // extract incoming `traceparent` headers for correlation even
+    // when OTel export is disabled.
     let composite = TextMapCompositePropagator::new(vec![
         Box::new(TraceContextPropagator::new()),
         Box::new(BaggagePropagator::new()),
     ]);
     opentelemetry::global::set_text_map_propagator(composite);
+
+    // Telemetry is opt-in: when no endpoint is configured, install a
+    // stdout-only JSON subscriber so logs are visible. The
+    // stdout/OTel paths are mutually exclusive — when OTel is enabled
+    // stdout stays silent by design (production log volume stays
+    // bounded by collector ingest).
+    let endpoint = match cfg.endpoint.as_deref() {
+        Some(e) if !e.trim().is_empty() => e,
+        _ => {
+            install_stdout_subscriber(cfg)
+                .try_init()
+                .context("install stdout subscriber")?;
+            tracing::info!("OpenTelemetry disabled — logs to stdout");
+            return Ok(None);
+        }
+    };
 
     let resource = build_resource(cfg);
     let tracer = build_tracer_provider(cfg, resource.clone())?;
@@ -163,7 +193,7 @@ pub fn init(cfg: &TelemetryConfig) -> anyhow::Result<Option<TelemetryGuard>> {
     // the OTel log bridge onto it. A single try_init at the end means
     // the layers stay composed — calling try_init twice would race the
     // global default and discard the first subscriber entirely.
-    let subscriber = install_log_provider(&log, install_subscriber(cfg, &tracer));
+    let subscriber = install_log_provider(&log, install_otel_subscriber(cfg, &tracer));
     subscriber
         .try_init()
         .context("install tracing subscriber")?;
