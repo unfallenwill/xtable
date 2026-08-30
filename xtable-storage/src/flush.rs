@@ -49,7 +49,14 @@ pub const DEFAULT_FLUSH_CONCURRENCY: usize = 4;
 /// Run the flush loop indefinitely, picking up immutable memtables as
 /// they arrive. Each immutable is flushed in `flush_one`. Caller is
 /// responsible for spawning the loop (typically once at server start).
-#[tracing::instrument(level = "info", name = "flush.loop", skip_all, err)]
+///
+/// NOTE: This function is intentionally NOT `#[tracing::instrument]`-ed —
+/// it is a long-lived task whose single span would live the entire
+/// process lifetime, leaking per-span metadata into the tracing
+/// subscriber, producing a never-ending trace in trace UIs, and
+/// starving short-lived spans in tail-based samplers. Each iteration
+/// is captured by the `#[instrument]` on `flush_one`, which produces
+/// a discrete `memtable.flush` span per memtable.
 pub async fn flush_loop(
     memtables: Arc<MemTableSet>,
     store: crate::store::LocalStore,
