@@ -7,6 +7,7 @@ members = [
     "xtable-auth",
     "xtable-tx",
     "xtable-schema",
+    "xtable-telemetry",
     "xtable-server",
     "xtable-cli",
 ]
@@ -64,12 +65,19 @@ bytes = "1.7"
 zstd = "0.13"
 crc32fast = "1.4"
 
-# Errors / tracing / metrics
+# Errors / tracing / telemetry
 thiserror = "1"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-metrics = "0.23"
+opentelemetry = { version = "0.27", features = ["trace", "logs", "metrics"] }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "trace", "logs", "metrics", "testing"] }
+opentelemetry-otlp = { version = "0.27", default-features = false, features = ["grpc-tonic", "http-proto", "trace", "logs", "metrics"] }
+opentelemetry-semantic-conventions = "0.27"
+opentelemetry-appender-tracing = "0.27"
+tracing-opentelemetry = "0.28"
+hostname = "0.4"
+rustc_version_runtime = "0.3"
 
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }
