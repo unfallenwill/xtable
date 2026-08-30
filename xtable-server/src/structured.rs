@@ -390,7 +390,6 @@ async fn delete_record(
         vec![
             KeyValue::new("space", space.clone()),
             KeyValue::new("table", table.clone()),
-            KeyValue::new("record_id", record_id.clone()),
         ],
     );
     let space_in = space.clone();
