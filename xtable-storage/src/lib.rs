@@ -30,7 +30,7 @@ pub use memtable::{
 };
 pub use store::LocalStore;
 pub use txn_state::{
-    BlobRecord, MultipartState, ReadSetEntry, RecordIndexEntry, SchemaIndexEntry, StoredRecord,
+    BlobRecord, MultipartState, RecordIndexEntry, SchemaIndexEntry, StoredRecord,
     TxnStateRecord, WriteSetEntry,
 };
 pub use version_chain::{VersionChain, VersionEntry};

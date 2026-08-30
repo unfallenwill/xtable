@@ -6,8 +6,9 @@
 //!
 //! Phase 2 surfaces:
 //! - WAL (append-only, monotonic seq)
-//! - txn_state (per txn lifecycle)
-//! - read_set / write_set (OCC bookkeeping)
+//! - txn_state (per txn lifecycle, including read_keys/write_keys used
+//!   for SSI read-edge capture)
+//! - write_set (staged writes awaiting commit)
 //! - staged_blobs (body spill metadata)
 //! - multipart (Phase 3 in-flight uploads)
 
@@ -952,14 +953,17 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let store = LocalStore::open_path(&tmp.path().join("xt.redb")).unwrap();
         let r1 = WalRecord::Begin { txn_id: "T1".into(), snapshot_version: 0, idempotency_key: None };
-        let r2 = WalRecord::Commit { txn_id: "T1".into(), commit_version: 1, write_keys: vec![] };
+        let r2 = WalRecord::Committing { txn_id: "T1".into(), upload_keys: vec![] };
+        let r3 = WalRecord::Committed { txn_id: "T1".into(), commit_version: 1 };
         store.append_wal(&r1).unwrap();
         store.append_wal(&r2).unwrap();
+        store.append_wal(&r3).unwrap();
         let log = store.iter_wal().unwrap();
-        assert_eq!(log.len(), 2);
+        assert_eq!(log.len(), 3);
         assert_eq!(log[0].1, r1);
         assert_eq!(log[1].1, r2);
-        assert_eq!(store.last_wal_seq().unwrap(), 2);
+        assert_eq!(log[2].1, r3);
+        assert_eq!(store.last_wal_seq().unwrap(), 3);
     }
 
     #[test]

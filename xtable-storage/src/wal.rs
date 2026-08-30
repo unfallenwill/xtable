@@ -5,22 +5,21 @@
 //! produces one record. The order of records in `TBL_WAL` is the ground
 //! truth for crash recovery.
 //!
-//! ## MVCC + SSI era (current)
+//! ## MVCC + Cahill SSI commit protocol
 //!
-//! Two variant groups live here:
-//! - **Legacy OCC-era** (`Begin` / `Stage` / `Committing` / `Committed` /
-//!   `CommitResult` / `Aborted`) — kept for WAL format compatibility
-//!   (recovery tests, log-replay tooling).
-//! - **New MVCC+SSI-era** (`CahillEdge` / `Commit` / `MemtableFlushed`) —
-//!   used by the live commit path.
+//! Per-txn lifecycle: `Begin` → `Stage`* → `Committing` → `Committed` →
+//! `CommitResult` (or `Aborted` at any point). The `Committing` record is
+//! written **before** S3 uploads begin, so recovery can compensate-delete
+//! any partial uploads on crash.
+//!
+//! Global: `MemtableFlushed` records a chunk-uploaded memtable; the flush
+//! loop truncates WAL up to that record's `up_to_seq`.
 
 use serde::{Deserialize, Serialize};
 
 /// A WAL record type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WalRecord {
-    // ===== Legacy OCC-era variants (kept for WAL format compat; unused by commit path) =====
-
     /// Transaction started.
     Begin {
         txn_id: String,
@@ -53,25 +52,6 @@ pub enum WalRecord {
     Aborted {
         txn_id: String,
         reason: String,
-    },
-
-    // ===== New LSM-era variants (used by memtable + chunk flush pipeline) =====
-
-    /// Cahill stage: a write has been added to the txn's in-memory SI
-    /// edge set. Used by the LSM commit protocol (PR #4) and as a
-    /// recovery audit trail.
-    CahillEdge {
-        txn_id: String,
-        key: String,
-        edges: Vec<StoredEdge>,
-    },
-
-    /// Transaction committed. Atomic with memtable publish + version
-    /// chain append in the same redb write txn (PR #4).
-    Commit {
-        txn_id: String,
-        commit_version: u64,
-        write_keys: Vec<String>,
     },
 
     /// Memtable was flushed to S3. GC truncates WAL up to `up_to_seq`
@@ -110,9 +90,7 @@ impl WalRecord {
             | Self::Committing { txn_id, .. }
             | Self::Committed { txn_id, .. }
             | Self::CommitResult { txn_id, .. }
-            | Self::Aborted { txn_id, .. }
-            | Self::CahillEdge { txn_id, .. }
-            | Self::Commit { txn_id, .. } => Some(txn_id),
+            | Self::Aborted { txn_id, .. } => Some(txn_id),
             Self::MemtableFlushed { .. } => None,
         }
     }
@@ -130,10 +108,7 @@ impl WalRecord {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Committed { .. }
-                | Self::CommitResult { .. }
-                | Self::Aborted { .. }
-                | Self::Commit { .. }
+            Self::Committed { .. } | Self::CommitResult { .. } | Self::Aborted { .. }
         )
     }
 }
@@ -149,7 +124,7 @@ mod tests {
 
     #[test]
     fn txn_id_extraction_works_for_all_variants() {
-        let records = vec![
+        let records = [
             WalRecord::Begin {
                 txn_id: "T1".into(),
                 snapshot_version: 0,
@@ -177,16 +152,6 @@ mod tests {
                 txn_id: "T1".into(),
                 reason: "x".into(),
             },
-            WalRecord::CahillEdge {
-                txn_id: "T1".into(),
-                key: "k".into(),
-                edges: vec![],
-            },
-            WalRecord::Commit {
-                txn_id: "T1".into(),
-                commit_version: 5,
-                write_keys: vec![],
-            },
             WalRecord::MemtableFlushed {
                 chunk_id: "C1".into(),
                 up_to_seq: 10,
@@ -195,13 +160,13 @@ mod tests {
         ];
         // Per-txn records: txn_id() returns Some("T1").
         // (MemtableFlushed is a global record and returns None — tested separately below.)
-        for (_i, r) in records[..8].iter().enumerate() {
+        for (_i, r) in records[..6].iter().enumerate() {
             assert_eq!(r.txn_id(), Some("T1"));
         }
         // PR-Fix2.3: MemtableFlushed is a global record; txn_id returns None
         // and the chunk_id is exposed via the dedicated `chunk_id()` accessor.
-        assert_eq!(records[8].txn_id(), None);
-        assert_eq!(records[8].chunk_id(), Some("C1"));
+        assert_eq!(records[6].txn_id(), None);
+        assert_eq!(records[6].chunk_id(), Some("C1"));
     }
 
     #[test]
@@ -217,22 +182,16 @@ mod tests {
             reason: "r".into()
         }
         .is_terminal());
-        assert!(WalRecord::Commit {
-            txn_id: "t".into(),
-            commit_version: 1,
-            write_keys: vec![],
-        }
-        .is_terminal());
         assert!(!WalRecord::Begin {
             txn_id: "t".into(),
             snapshot_version: 0,
             idempotency_key: None
         }
         .is_terminal());
-        assert!(!WalRecord::CahillEdge {
+        assert!(!WalRecord::Stage {
             txn_id: "t".into(),
             key: "k".into(),
-            edges: vec![],
+            body_handle: None
         }
         .is_terminal());
         assert!(!WalRecord::MemtableFlushed {

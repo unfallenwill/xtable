@@ -1,8 +1,9 @@
 //! Transaction status values used in the local WAL/recovery protocol.
 //!
-//! After the OCC→MVCC+SSI conversion (PR #1-#3), the state machine is:
-//! `Active → Committing → {Committed, Aborted}`. The legacy `Validating`
-//! intermediate state (OCC validate phase) has been removed.
+//! The state machine is `Active → Committing → {Committed, Aborted}`. SI
+//! locks are acquired during the `Active` phase; the `Committing` phase
+//! performs Cahill cycle detection, S3 uploads, atomic chain append, and
+//! MemTable publish.
 
 /// Transaction state machine values written to the local WAL and to
 /// `TxnStateRecord.status`. This is independent of any HTTP layer.

@@ -400,10 +400,8 @@ async fn e2e_idempotent_commit_returns_same_outcome() {
 }
 
 #[tokio::test]
-async fn e2e_occ_conflict_one_winner() {
+async fn e2e_ssi_conflict_one_winner() {
     use xtable_storage::WriteSetEntry;
-    use xtable_storage::TxnStateRecord;
-    use xtable_storage::WalRecord;
 
     let (endpoint, _mock) = mock_s3_server().await;
     let backend = build_backend(&endpoint).await;
@@ -428,7 +426,7 @@ async fn e2e_occ_conflict_one_winner() {
         last_modified_unix_ms: 0,
     }).unwrap();
 
-    // Two txns both stage with version_at_read=0.
+    // Two txns both start at snapshot_version=0.
     let t1 = coord.begin(None).await.unwrap();
     let t2 = coord.begin(None).await.unwrap();
     coord.stage(&t1, &key, b"a".to_vec(), None, std::collections::HashMap::new(), false).await.unwrap();
@@ -439,13 +437,11 @@ async fn e2e_occ_conflict_one_winner() {
     let ws2: Vec<(String, WriteSetEntry)> = store.iter_write_set(&t2).unwrap();
     assert_eq!(ws1.len(), 1);
     assert_eq!(ws2.len(), 1);
-    // PR #3: version_at_read removed. SSI uses snapshot_version; both txns
-    // share snapshot=0. Cahill cycle detection (PR #4) prevents both from
-    // committing successfully.
+    // Both txns share snapshot=0. The commit-time snapshot conflict check
+    // prevents both from committing successfully: the first commits (chain
+    // advances to 1), the second sees chain=1 > its snapshot=0 → Conflict.
     let current_v = store.get_version(&key).unwrap().map(|r| r.latest_version.as_u64()).unwrap_or(0);
     assert_eq!(current_v, 0, "starting version");
-    // Both write_sets carry 0 — first commit advances to 1, second would see 1 != 0 → Conflict.
-    let _ = (TxnStateRecord::new_active, WalRecord::Begin { txn_id: String::new(), snapshot_version: 0, idempotency_key: None });
 }
 
 // =========================================================================
@@ -570,16 +566,16 @@ async fn e2e_mvcc_gc_old_versions_does_not_break_active_readers() {
 }
 
 #[tokio::test]
-async fn e2e_mvcc_occ_conflict_one_winner() {
-    // Direct chain-level OCC test: two writes at the same version_at_read,
-    // first commits, second would observe chain[k].latest > version_at_read → Conflict.
+async fn e2e_mvcc_ssi_conflict_one_winner() {
+    // Direct chain-level MVCC+SSI test: two writes at the same
+    // snapshot_version, first commits, second would observe chain[k].latest
+    // > snapshot_version → Conflict.
     let store = LocalStore::open_path(
         &tempfile::TempDir::new().unwrap().path().join("xt.redb"),
     ).unwrap();
     // Seed chain with v=5.
     store.append_chain_entry("k", &VersionEntry::new(5, "e5".into(), "k".into(), "init".into(), 10)).unwrap();
-    // Two "txns" stage. PR #3: version_at_read removed; SSI uses
-    // snapshot_version stored on TxnStateRecord.
+    // Two "txns" stage with the same snapshot_version=5.
     let ws_a = xtable_storage::WriteSetEntry {
         backend_key: "k".into(),
         body_handle: None,

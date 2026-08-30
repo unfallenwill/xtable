@@ -319,8 +319,9 @@ impl TxnCoordinator {
         Ok(())
     }
 
-    /// Commit a transaction. PR #3 removed the OCC validate phase; PR #4
-    /// wires the SI lock manager + MemTable publish into `commit_inner`.
+    /// Commit a transaction. Runs Cahill cycle detection, S3 uploads,
+    /// atomic chain append, and MemTable publish — all within a single
+    /// crash-safe protocol (see `commit_inner` for the step-by-step).
     #[tracing::instrument(
         level = "info",
         name = "txn.commit",
@@ -384,9 +385,6 @@ impl TxnCoordinator {
 
         txn.status = TxnStatus::Committing;
         self.store.put_txn_state(txn_id, &txn)?;
-
-        // PR #3: OCC validate removed. Conflict detection moves to the
-        // SI lock manager via `find_dangerous_structure()` at commit.
 
         // 4. Allocate new versions per key. Sort for deterministic ordering.
         let mut sorted_keys: Vec<String> = txn.write_keys.clone();
@@ -558,11 +556,11 @@ impl TxnCoordinator {
         }
 self.store.append_chain_entries_bulk(&entries)?;
 
-        // V4 fix: keep TBL_VERSIONS in sync with the chain. Even though
-        // OCC validation now reads the chain directly, TBL_VERSIONS is
-        // still load-bearing for compensation (V3 — needs the prior
-        // backend_key to restore on partial-failure aborts) and for the
-        // rebuild path (single source of truth per object).
+        // V4 fix: keep TBL_VERSIONS in sync with the chain. The chain is
+        // the authoritative log; TBL_VERSIONS mirrors it for compensation
+        // (V3 — needs the prior backend_key to restore on partial-failure
+        // aborts) and for the rebuild path (single source of truth per
+        // object).
         let now_ms = Utc::now().timestamp_millis();
         let mut version_updates: Vec<(ObjectKey, VersionRecord)> =
             Vec::with_capacity(alloc_versions.len());

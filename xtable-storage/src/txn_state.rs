@@ -33,13 +33,6 @@ impl TxnStateRecord {
     }
 }
 
-/// ReadSet entry: per (txn_id, key) — what version was observed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReadSetEntry {
-    pub version_observed: u64,
-    pub etag_observed: String,
-}
-
 /// WriteSet entry: per (txn_id, key) — staged write metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriteSetEntry {

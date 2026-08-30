@@ -1,8 +1,9 @@
-//! xtable-tx: MVCC + SSI transaction coordinator.
+//! xtable-tx: MVCC + Cahill SSI transaction coordinator.
 //!
-//! MVCC + Cahill SSI commit protocol. PR #3 removed the OCC era; PR #4 wired
-//! the SI lock manager + MemTable publish. PR #1-#3 + Fix8 + Fix9 are live.
-//! SSI via `si_lock_manager`.
+//! MVCC + Cahill SSI commit protocol. The `TxnCoordinator` runs the SI
+//! lock manager (`si_lock_manager`) for rw-edge capture, performs Cahill
+//! cycle detection inside `commit`, publishes new entries to the in-memory
+//! MemTable, and writes a crash-safe WAL.
 
 pub mod cahill;
 pub mod coordinator;

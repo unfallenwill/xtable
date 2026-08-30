@@ -66,11 +66,12 @@ async fn recover_inner(
     let mut last_uploaded: HashMap<String, Vec<String>> = HashMap::new();
 
     for (_seq, rec) in &log {
-        // All legacy per-txn variants carry a txn_id. The new global
-        // variants (CahillEdge/Commit/MemtableFlushed) carry either
-        // txn_id or chunk_id; the legacy recovery logic below only
-        // matches on per-txn variants so a None is unreachable here.
-        let txn_id = rec.txn_id().expect("per-txn variant without txn_id").to_string();
+        // Per-txn variants carry a txn_id; `MemtableFlushed` is a global
+        // record and is skipped (its presence already implies the WAL
+        // truncator has run for everything before `up_to_seq`).
+        let Some(txn_id) = rec.txn_id().map(str::to_string) else {
+            continue;
+        };
         match rec {
             WalRecord::Begin { .. } => {
                 last_status.entry(txn_id.clone()).or_insert(TxnStatus::Active);
@@ -90,19 +91,6 @@ async fn recover_inner(
             }
             WalRecord::Aborted { .. } => {
                 last_status.insert(txn_id.clone(), TxnStatus::Aborted);
-            }
-            // PR-Fix2.5: `Commit` is terminal — the chain append + memtable
-            // publish happened atomically with this WAL record. Treating
-            // it as `Active` would call `abort_txn_no_uploads`, which only
-            // drops staged blobs and leaves the chain intact — leaving
-            // TxnState.status=Aborted inconsistent with a published chain.
-            WalRecord::Commit { .. } => {
-                last_status.insert(txn_id.clone(), TxnStatus::Committed);
-            }
-            // `CahillEdge` is non-terminal (audit-only); `MemtableFlushed`
-            // is global. Both pass through unchanged.
-            WalRecord::CahillEdge { .. } => {
-                last_status.entry(txn_id.clone()).or_insert(TxnStatus::Active);
             }
             WalRecord::MemtableFlushed { .. } => {
                 // Global; no per-txn status update.

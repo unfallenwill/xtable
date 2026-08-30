@@ -30,15 +30,15 @@ async fn build() -> (TxnCoordinator, LocalStore, TempDir) {
 }
 
 // =========================================================================
-// V4 — OCC must read the chain, not a separate TBL_VERSIONS
+// V4 — write-write conflict detection reads the chain, not a separate TBL_VERSIONS
 // =========================================================================
 
 #[tokio::test]
-async fn unit_v4_stage_records_chain_version_as_version_at_read() {
-    // The V4 fix made stage() read chain.latest_commit_version() instead
+async fn unit_v4_stage_records_chain_version_at_snapshot() {
+    // The V4 fix made stage() observe chain.latest_commit_version() instead
     // of TBL_VERSIONS. We verify by:
     // 1. Pre-populating the chain with a version-5 entry.
-    // 2. stage() must record version_at_read=5.
+    // 2. The txn's snapshot_version is 5 (matches the chain).
     let (_coord, store, _tmp) = build().await;
     let _key = ObjectKey::new("k");
     store
@@ -53,16 +53,16 @@ async fn unit_v4_stage_records_chain_version_as_version_at_read() {
     // Verify: read_chain("k").latest_commit_version() == 5.
     let chain = store.read_chain("k").unwrap();
     assert_eq!(chain.latest_commit_version(), 5);
-    // The OCC validate, given two txns starting at snapshot=5 with version_at_read=5,
-    // would see chain=5 vs 5 → OK. After one commits (chain→6), the other's
-    // validate sees chain=6 vs 5 → Conflict. This is the correct behavior.
+    // Two txns starting at snapshot=5 with chain=5 → OK. After one commits
+    // (chain→6), the other's commit-time snapshot check sees chain=6 vs 5
+    // → Conflict. This is the correct behavior.
 }
 
 #[tokio::test]
 async fn unit_v4_chain_append_advances_version() {
     // After two commits to the same key, the chain must have two entries
     // with strictly increasing commit_version. This is the precondition for
-    // OCC detection to work correctly.
+    // MVCC+SSI snapshot conflict detection to work correctly.
     let (_coord, store, _tmp) = build().await;
     store.append_chain_entry("k", &VersionEntry::new(1, "e1".into(), "k".into(), "T1".into(), 10)).unwrap();
     store.append_chain_entry("k", &VersionEntry::new(2, "e2".into(), "k".into(), "T2".into(), 10)).unwrap();
@@ -267,7 +267,7 @@ async fn unit_v10_write_set_entry_preserves_deleted_flag() {
 
 #[tokio::test]
 async fn unit_v18_stage_signature_no_threshold_param() {
-    // V18 fix: stage() no longer takes a `version_at_read_threshold`
+    // V18 fix: stage() no longer takes a snapshot-version threshold
     // parameter (which used to be incorrectly set to current_global_version()
     // from the HTTP layer, breaking every txn after the first).
     // We verify by counting the parameters in the coordinator's stage().
@@ -575,15 +575,15 @@ fn unit_v15_sigv4_verification_works() {
 }
 
 // =========================================================================
-// V16 — version_at_read is the txn's snapshot_version, not chain latest
+// V16 — snapshot_version is captured at begin, not chain latest
 // =========================================================================
 
 #[tokio::test]
-async fn unit_v16_version_at_read_is_snapshot() {
-    // V16 fix: stage() reads version_at_read from txn.snapshot_version
-    // (captured at begin), NOT from chain.latest_commit_version at stage
-    // time. The proptest proptest_i5_occ_compatibility already covers
-    // the OCC validation; this test pins the version_at_read semantics
+async fn unit_v16_snapshot_version_is_captured_at_begin() {
+    // V16 fix: snapshot_version is captured at `begin()` and stored on
+    // `TxnStateRecord`. It is NOT refreshed from chain.latest_commit_version
+    // at stage time. The proptest `prop_i5_ssi_compatibility` already covers
+    // the SSI conflict detection; this test pins the snapshot semantics
     // directly by checking the staged entry's recorded value.
     let (coord, store, _tmp) = build().await;
     // Bump global_version to 5 BEFORE begin.
@@ -591,8 +591,8 @@ async fn unit_v16_version_at_read_is_snapshot() {
     let txn = coord.begin(None).await.unwrap();
     // Now bump global_version further (simulates concurrent commit).
     for _ in 0..3 { let _ = store.next_global_version().unwrap(); }
-    // Stage — PR #3 removed version_at_read. The txn's snapshot_version
-// is now stored on TxnStateRecord, not WriteSetEntry.
+    // Stage — snapshot_version was captured at begin and is now stored on
+    // TxnStateRecord, not WriteSetEntry.
     coord.stage(&txn, &ObjectKey::new("k"), b"v".to_vec(), None, HashMap::new(), false).await.unwrap();
     let ws = store.iter_write_set(&txn).unwrap();
     assert_eq!(ws.len(), 1);

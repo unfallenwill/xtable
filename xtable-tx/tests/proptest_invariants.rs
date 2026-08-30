@@ -10,8 +10,8 @@
 //!    txn's writes are all absent. No partial visibility.
 //!
 //! 2. **Conflict detection**: When two txns stage writes to the same key
-//!    with different `version_at_read`, exactly one wins on commit; the
-//!    other gets a 409 Conflict.
+//!    starting from the same `snapshot_version`, exactly one wins on commit
+//!    and the other gets a 409 Conflict.
 //!
 //! 3. **Version monotonicity**: After successful commits, each key's
 //!    version strictly increases.
@@ -79,11 +79,10 @@ async fn inv_commit_no_writes_is_idempotent() {
 }
 
 // =========================================================================
-// INVARIANT 2 (removed): OCC conflict detection
+// INVARIANT 2 (moved): write-write conflict detection
 // =========================================================================
 //
-// The OCC-specific `version_at_read` invariant is gone in the MVCC+SSI era.
-// The corresponding property is now covered by:
+// The MVCC+SSI write-write conflict property is exercised by:
 //   - `ssi_write_write_one_winner` in `tests/ssi_invariants.rs`
 //     (snapshot-conflict check in `append_chain_entries_bulk`)
 //   - `ssi_write_skew_aborts_one` (Cahill cycle detection)

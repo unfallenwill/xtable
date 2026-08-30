@@ -5,7 +5,7 @@
 //! message for the original V-number).
 //!
 //! Mapping (finding → test):
-//!   poc1 → V4   OCC must reject write-write conflicts between concurrent txns
+//!   poc1 → V4   MVCC+SSI must reject write-write conflicts between concurrent txns
 //!   poc2 → V2   Recovery must complete a commit whose WAL stalled at
 //!               "Committing" — never delete the already-published object
 //!   poc3 → V1   Cold rebuild must not classify committed backend objects
@@ -213,7 +213,7 @@ async fn stage(coord: &TxnCoordinator, txn: &str, key: &str, body: &[u8]) {
 }
 
 // =========================================================================
-// Regression: V4 — OCC must detect write-write conflicts
+// Regression: V4 — MVCC+SSI must detect write-write conflicts
 // =========================================================================
 
 #[tokio::test]
@@ -256,8 +256,8 @@ async fn poc2_recovery_deletes_published_commit() {
     // append_chain_entries_bulk (line ~306) and WAL Committed (line ~311):
     // chain entry + backend object are already published, only the WAL
     // Committed record is missing.
-    // PR #3: ValidateOk variant removed. Use Committed directly to mark
-    // a crash window between Committing and the WAL terminal.
+    // Reconstruct the crash window between `Committing` and the WAL terminal
+    // by writing a `Committed` record directly (the canonical terminal).
     store.append_wal(&WalRecord::Committing {
         txn_id: txn.clone(),
         upload_keys: vec!["k".into()],

@@ -6,7 +6,7 @@
 //! Invariants covered:
 //! - I1 (chain strictly monotonic):  prop_i1_chain_monotonic
 //! - I3 (snapshot isolation):         prop_i3_snapshot_isolation
-//! - I5 (OCC compatibility):         prop_i5_occ_compatibility
+//! - I5 (SSI conflict semantics):     prop_i5_ssi_compatibility
 //! - I6 (multi-object atomicity):     prop_i6_multi_object_atomicity
 //! - I7 (WAL replay equivalence):    prop_i7_wal_replay_equivalence
 //! - I8 (GC safety):                 prop_i8_gc_preserves_snapshot
@@ -99,23 +99,26 @@ proptest! {
 }
 
 // =========================================================================
-// INVARIANT I5: OCC conflict semantics preserved in MVCC mode
+// INVARIANT I5: SSI conflict semantics — two txns starting from the same
+// snapshot where one commits first must prevent the other from overwriting.
 // =========================================================================
 
 proptest! {
     #[test]
-    fn prop_i5_occ_compatibility(
-        version_at_read in 1u64..10,
+    fn prop_i5_ssi_compatibility(
+        snapshot_version in 1u64..10,
     ) {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {
             let store = make_store();
-            // Seed key with version_at_read.
-            store.append_chain_entry("k", &entry(version_at_read, "k", 10)).unwrap();
-            // Txn A stages with this version; Txn B stages with same version.
-            // After B commits (simulated), if A tries to validate, it sees
-            // chain[k].latest_commit_version > version_at_read → conflict.
-            let mut a_state = xtable_storage::TxnStateRecord::new_active(version_at_read, None, 0);
+            // Seed key at snapshot_version.
+            store.append_chain_entry("k", &entry(snapshot_version, "k", 10)).unwrap();
+            // Txn A starts at this snapshot and stages a write to "k".
+            // Txn B starts at the same snapshot and stages a write to "k".
+            // After B commits, A's snapshot is stale: chain[k].latest
+            // has advanced past A's snapshot, so the commit-time snapshot
+            // conflict check must reject A.
+            let mut a_state = xtable_storage::TxnStateRecord::new_active(snapshot_version, None, 0);
             a_state.write_keys.push("k".into());
             store.put_txn_state("A", &a_state).unwrap();
             store.put_write_entry("A", "k", &xtable_storage::WriteSetEntry {
@@ -127,15 +130,14 @@ proptest! {
                 user_meta: vec![],
                 deleted: false,
             }).unwrap();
-            // Txn B's commit_version gets allocated as version_at_read + 1.
-            let b_version = version_at_read + 1;
+            // Txn B's commit_version is allocated as snapshot_version + 1.
+            let b_version = snapshot_version + 1;
             store.append_chain_entry("k", &entry(b_version, "k", 20)).unwrap();
-            // Now A's validate would find chain[k].latest_commit_version = b_version,
-            // not version_at_read → OCC conflict.
+            // Now A's commit-time snapshot check finds chain[k].latest = b_version,
+            // > A's snapshot → snapshot conflict.
             let chain = store.read_chain("k").unwrap();
             prop_assert_eq!(chain.latest_commit_version(), b_version);
-            // A's recorded version_at_read != current → conflict.
-            prop_assert_ne!(chain.latest_commit_version(), version_at_read);
+            prop_assert!(chain.latest_commit_version() > a_state.snapshot_version);
             Ok(())
         })?;
     }
