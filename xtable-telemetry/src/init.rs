@@ -141,6 +141,24 @@ pub fn init(cfg: &TelemetryConfig) -> anyhow::Result<Option<TelemetryGuard>> {
     let meter = build_meter_provider(cfg, resource.clone())?;
     let log = install_log_appender(cfg, resource)?;
 
+    // Install the live `SdkMeterProvider` as the process-wide meter
+    // provider. Without this, `Metrics::default()` (used by
+    // `OnceLock<Metrics>` in xtable-tx, xtable-storage, xtable-backend,
+    // xtable-schema) and the `Metrics::new(&global::meter("xtable"))`
+    // call in xtable-server main bind their instruments to whatever
+    // global provider existed at first call — the no-op default —
+    // and every recording is silently dropped. Mirrors the
+    // `set_tracer_provider` call in `install_subscriber`.
+    //
+    // Sequencing contract: instruments constructed AFTER this call
+    // (i.e. any `Metrics::new(...)` or `Metrics::default()` executed
+    // by later initialization) will bind to the live `SdkMeterProvider`
+    // and forward recordings to the OTLP exporter. Instruments
+    // constructed BEFORE this call (e.g. from a test that built
+    // Metrics before init()) bind to whatever provider existed at
+    // construction time and are unaffected by this re-bind.
+    opentelemetry::global::set_meter_provider(meter.clone());
+
     // Build the layered subscriber (without calling try_init) and chain
     // the OTel log bridge onto it. A single try_init at the end means
     // the layers stay composed — calling try_init twice would race the
