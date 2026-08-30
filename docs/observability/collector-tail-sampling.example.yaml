@@ -1,0 +1,48 @@
+# Tail-sampling processor config — OTel Collector deployment reference.
+#
+# Spec: docs/superpowers/specs/2026-08-30-otel-server-design.md §7.2
+#
+# This is a DEPLOYMENT-ONLY reference. xtable does not ship a Collector.
+# Copy this block into your Collector's main config under `processors:`,
+# wire it into a `pipelines.traces` section after `batch`, and enable
+# the processor by name in the pipeline's `processors` list.
+#
+# Decision wait: 10s — enough headroom for slow traces; small enough to
+# keep the in-memory buffer bounded. Tune via the `traces_sampled` export
+# metric (drops == `decision_wait * (1 - keep_rate)`).
+
+processors:
+  tail_sampling:
+    decision_wait: 10s
+    policies:
+      - { name: errors,        type: status_code,  status_code: {status_codes: [ERROR]} }
+      - { name: slow,          type: latency,      latency: {threshold_ms: 2000} }
+      - { name: keep-flagged,  type: and,          and: {sub_policies: [
+          {type: boolean_attribute, key: baggage.sampling.priority, value: true} ]} }
+      - { name: rest,          type: probabilistic, probabilistic: {sampling_percentage: 1} }
+
+# Pipeline wiring (NOT part of the processor config above — add to your
+# Collector's `service.pipelines` block):
+#
+#   service:
+#     pipelines:
+#       traces:
+#         receivers: [otlp]
+#         processors: [tail_sampling, batch]
+#         exporters: [otlp/tempo]
+#
+# Rationale (spec §7.2):
+#   - `errors`   — keep every trace with OTel status = ERROR. SRE visibility.
+#   - `slow`     — keep traces over 2s; threshold matches the txn.commit.duration
+#                  RED p99 SLO discussion in the design doc.
+#   - keep-flagged — keep traces that explicitly opted in via baggage
+#                  `sampling.priority=true`. Business code marks a critical
+#                  trace with `Span::current().set_baggage("sampling.priority", "true")`.
+#   - `rest`     — sample 1% of the remaining low-priority traffic. Combined
+#                  with the SDK-side `ParentBased(0.05)` head sampler this
+#                  yields ~5e-5 effective trace rate for background traffic,
+#                  which is the design target.
+#
+# The four policies combine with OR semantics: a trace matching ANY policy
+# is kept. The `probabilistic: 1` policy must remain last so it only
+# applies to traces that didn't match a higher-priority policy.
