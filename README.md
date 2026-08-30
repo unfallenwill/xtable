@@ -387,6 +387,28 @@ curl -X POST http://localhost:9000/v1/spaces/acme/tables/tasks/records \
 
 ---
 
+## Observability
+
+xtable-server emits OpenTelemetry traces, metrics, and structured JSON
+logs when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Telemetry is **off by
+default** — leaving the env var unset keeps the server silent on the wire
+and writes JSON logs to stdout only.
+
+Key env vars:
+
+- `OTEL_EXPORTER_OTLP_ENDPOINT` — OTLP gRPC endpoint; required to enable export.
+- `OTEL_EXPORTER_OTLP_PROTOCOL` — `grpc` (default) or `http/protobuf`.
+- `OTEL_PROFILE` — `dev` / `staging` / `production` (default) / `debug`.
+- `OTEL_TRACES_SAMPLER_ARG` — head-based trace sample ratio (0.0–1.0).
+- `OTEL_SERVICE_NAME`, `OTEL_SERVICE_INSTANCE_ID` — resource attributes.
+
+See [`docs/observability/metric-naming.md`](docs/observability/metric-naming.md),
+[`docs/observability/log-conventions.md`](docs/observability/log-conventions.md),
+[`docs/observability/instrument-template.md`](docs/observability/instrument-template.md),
+and [`docs/observability/collector-tail-sampling.example.yaml`](docs/observability/collector-tail-sampling.example.yaml).
+
+---
+
 ## Test evidence
 
 ### Unit tests
