@@ -11,7 +11,9 @@ xtable-core = { path = "../xtable-core" }
 xtable-storage = { path = "../xtable-storage" }
 xtable-backend = { path = "../xtable-backend" }
 xtable-tx = { path = "../xtable-tx" }
+xtable-telemetry = { path = "../xtable-telemetry" }
 
+opentelemetry = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }

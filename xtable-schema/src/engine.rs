@@ -17,7 +17,7 @@
 //! - pin a snapshot explicitly with `pin_snapshot(snapshot_version)`.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -29,11 +29,20 @@ use xtable_core::{ObjectKey, XtableError, XtableResult};
 use xtable_storage::{
     LocalStore, RecordIndexEntry, SchemaIndexEntry,
 };
+use xtable_telemetry::metrics::Metrics;
+use xtable_telemetry::timed::Timed;
+use xtable_telemetry::KeyValue;
 use xtable_tx::{CommitEvent, PostCommitHook, TxnCoordinator};
 
 use crate::key::{is_structured_key, parse_record_key, parse_schema_key, record_key, schema_key};
 use crate::query::{Query, QueryResult, Record};
 use crate::validation::{validate, JsonSchema, ValidationError};
+
+/// Lazily-initialised `Metrics` bound to the global OTel meter.
+fn metrics() -> &'static Metrics {
+    static METRICS: OnceLock<Metrics> = OnceLock::new();
+    METRICS.get_or_init(Metrics::default)
+}
 
 /// A transaction handle exposed to the structured-layer caller.
 #[derive(Debug, Clone)]
@@ -255,6 +264,13 @@ impl StructuredSpace {
     /// Register a new schema version for `(space, name)`. Versions are
     /// monotonically allocated (1, 2, ...). The body must be a JSON object.
     /// Returns the version assigned to this registration.
+    #[tracing::instrument(
+        level = "info",
+        name = "schema.register",
+        skip_all,
+        fields(space = %space, op = "register"),
+        err,
+    )]
     pub async fn register_schema(
         &self,
         t: &StructuredTxn,
@@ -262,6 +278,11 @@ impl StructuredSpace {
         name: &str,
         body: Value,
     ) -> XtableResult<u32> {
+        let m = metrics();
+        let _timed = Timed::new(
+            &m.txn_commit_duration,
+            vec![KeyValue::new("op", "register")],
+        );
         if !body.is_object() {
             return Err(XtableError::invalid("schema body must be a JSON object"));
         }
@@ -412,11 +433,22 @@ impl StructuredSpace {
     /// Upsert a record inside a txn. Body is validated against the table's
     /// current schema (if one is bound). All validation happens BEFORE
     /// the body is staged, so an invalid write never reaches the backend.
+    #[tracing::instrument(
+        level = "info",
+        name = "schema.upsert",
+        skip_all,
+        fields(space = %write.space, table = %write.table, op = "upsert"),
+        err,
+    )]
     pub async fn upsert_record(
         &self,
         t: &StructuredTxn,
         write: RecordWrite,
     ) -> XtableResult<WriteOutcome> {
+        let _timed = Timed::new(
+            &metrics().txn_commit_duration,
+            vec![KeyValue::new("op", "upsert")],
+        );
         let space = write.space.clone();
         let table = write.table.clone();
         let schema_version = self.resolve_table_schema_version(&t.txn_id, &space, &table, t.snapshot_version)?;
@@ -505,6 +537,10 @@ impl StructuredSpace {
         table: &str,
         record_id: &str,
     ) -> XtableResult<()> {
+        let _timed = Timed::new(
+            &metrics().txn_commit_duration,
+            vec![KeyValue::new("op", "delete")],
+        );
         let cur = self
             .store
             .get_record_index(space, table, record_id)?
@@ -556,6 +592,10 @@ impl StructuredSpace {
         record_id: &str,
         snapshot: Option<u64>,
     ) -> XtableResult<Option<Record>> {
+        let _timed = Timed::new(
+            &metrics().txn_commit_duration,
+            vec![KeyValue::new("op", "get_record")],
+        );
         let snap = snapshot.unwrap_or(txn.snapshot_version);
         match self.store.get_record_index_with_body(space, table, record_id)? {
             None => Ok(None),
@@ -585,6 +625,7 @@ impl StructuredSpace {
         }
     }
 
+    #[tracing::instrument(level = "info", name = "schema.query", skip_all, fields(space = %space, table = %table, op = "query"), err)]
     pub fn query_records(
         &self,
         txn: &StructuredTxn,
@@ -593,6 +634,10 @@ impl StructuredSpace {
         query: Query,
         snapshot: Option<u64>,
     ) -> XtableResult<QueryResult> {
+        let _timed = Timed::new(
+            &metrics().txn_commit_duration,
+            vec![KeyValue::new("op", "query")],
+        );
         let snap = snapshot.unwrap_or(txn.snapshot_version);
         let mut records: Vec<Record> = Vec::new();
         for (rid, idx, body) in self.store_iter_with_body(space, table)? {
