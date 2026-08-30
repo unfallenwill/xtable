@@ -4096,6 +4096,8 @@ dependencies = [
  "figment",
  "http 1.5.0",
  "hyper 1.11.1",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "serde",
  "serde_json",
  "tempfile",
