@@ -4011,6 +4011,7 @@ dependencies = [
  "bytes",
  "futures",
  "hex",
+ "opentelemetry",
  "serde",
  "sha2 0.10.9",
  "tempfile",
@@ -4019,6 +4020,7 @@ dependencies = [
  "tracing",
  "xtable-core",
  "xtable-storage",
+ "xtable-telemetry",
  "xtable-tx",
 ]
 
@@ -4065,6 +4067,7 @@ dependencies = [
  "chrono",
  "futures",
  "hex",
+ "opentelemetry",
  "proptest",
  "regex",
  "serde",
@@ -4078,6 +4081,7 @@ dependencies = [
  "xtable-backend",
  "xtable-core",
  "xtable-storage",
+ "xtable-telemetry",
  "xtable-tx",
 ]
 
@@ -4120,6 +4124,7 @@ dependencies = [
  "dashmap",
  "futures",
  "hex",
+ "opentelemetry",
  "parking_lot",
  "proptest",
  "redb",
@@ -4134,6 +4139,7 @@ dependencies = [
  "ulid",
  "xtable-backend",
  "xtable-core",
+ "xtable-telemetry",
  "xxhash-rust",
  "zstd",
 ]
@@ -4180,6 +4186,7 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "http 1.5.0",
+ "opentelemetry",
  "parking_lot",
  "proptest",
  "redb",
@@ -4195,6 +4202,7 @@ dependencies = [
  "xtable-backend",
  "xtable-core",
  "xtable-storage",
+ "xtable-telemetry",
 ]
 
 [[package]]
