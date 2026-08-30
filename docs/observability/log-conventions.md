@@ -84,7 +84,7 @@ These keys are safe to emit as structured fields on log records:
 These MUST NEVER appear in log attributes — same list and rationale as
 the metric-cardinality policy (see `metric-naming.md`):
 
-- `record_id`, `txn_id`, `request_id`, `page_id`, `body_id`, `body_hash`
+- `record_id`, `txn.id`, `request_id`, `page_id`, `body_id`, `body_hash`
 - `url.path`
 - `user_id`, `access_key_id`, `secret_access_key`
 - Any user-controlled string, any timestamp, any unbounded number
@@ -160,3 +160,10 @@ info!(
 
 A site that needs a different default level is an exception and should be
 called out in the PR.
+
+---
+
+> The forbidden list in §4.2 mirrors
+> `xtable-server/tests/metric_cardinality.rs::FORBIDDEN_LABELS` and
+> `docs/observability/metric-naming.md` §4.2. If you change one, change
+> all three.
