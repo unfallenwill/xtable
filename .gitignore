@@ -25,3 +25,6 @@ staged/
 # Secrets / local config
 .env
 .claude/settings.local.json
+
+# Internal design docs (specs, plans) — keep local, not for upstream review
+docs/superpowers/
