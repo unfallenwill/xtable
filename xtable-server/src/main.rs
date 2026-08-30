@@ -196,22 +196,25 @@ fn build_router(state: xtable_server::app::AppState) -> axum::Router {
     axum::Router::new()
         .merge(admin)
         .merge(structured_routes)
-        // Outer-first (axum semantics: the last `.layer()` call is the
-        // outermost middleware, so the request traverses layers top-down
-        // and the response bubbles bottom-up). TraceLayer must clone into
-        // each call (axum requires `Layer + Clone`), so we hand it unit
-        // marker types for the semconv adapters — they themselves are
-        // zero-sized `Clone` shims defined in `xtable-telemetry`.
-        .layer(TraceLayer::new_for_http()
-            .make_span_with(SemConvMakeSpan)
-            .on_response(SemConvOnResponse)
-            .on_failure(SemConvOnFailure))
+        // Axum middleware is LIFO: the LAST `.layer()` call is the OUTERMOST
+        // wrapper, so a request traverses layers top-down (outer → inner) and
+        // responses bubble bottom-up. TraceLayer must be outermost so every
+        // request — including auth-rejected 401s — produces a span and feeds
+        // the RED middleware; `auth_layer` is innermost so unauthenticated
+        // requests short-circuit at the bottom and their 401 responses still
+        // bubble up through TraceLayer and red_metrics_middleware on the way
+        // out (per spec §9.1 "every request including auth-rejected 401
+        // produces a span").
+        .layer(auth_layer)
+        .layer(middleware::from_fn(extract_matched_path))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             red_metrics_middleware,
         ))
-        .layer(middleware::from_fn(extract_matched_path))
-        .layer(auth_layer)
+        .layer(TraceLayer::new_for_http()
+            .make_span_with(SemConvMakeSpan)
+            .on_response(SemConvOnResponse)
+            .on_failure(SemConvOnFailure))
         .with_state(state)
 }
 
