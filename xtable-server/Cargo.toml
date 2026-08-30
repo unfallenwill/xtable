@@ -21,11 +21,10 @@ xtable-telemetry = { path = "../xtable-telemetry" }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
-tower-http = { workspace = true }
+tower-http = { workspace = true, features = ["trace"] }
 hyper = { workspace = true }
 http = "1.1"
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 figment = { workspace = true }
 toml = { workspace = true }
 anyhow = { workspace = true }
@@ -34,14 +33,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 
-# OpenTelemetry (PR-Fix15): OTLP tracing export.
-# Defaults match otel 0.27 ecosystem. Use `OTEL_EXPORTER_OTLP_ENDPOINT`
-# to enable (e.g. http://otel-collector:4317).
-opentelemetry = { version = "0.27", features = ["trace"] }
-opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "trace"] }
-opentelemetry-otlp = { version = "0.27", default-features = false, features = ["grpc-tonic", "trace"] }
-opentelemetry-semantic-conventions = "0.27"
-tracing-opentelemetry = "0.28"
+# OpenTelemetry handles live in `xtable-telemetry` (re-exported where needed).
 
 [dev-dependencies]
 tempfile = { workspace = true }

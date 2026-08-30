@@ -4,10 +4,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
+use axum::middleware;
 use axum::response::IntoResponse;
 use clap::Parser;
 use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
 
 
 use xtable_auth::StaticCredential;
@@ -26,13 +26,18 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    init_tracing();
-
     let args = Args::parse();
     let config_path = args
         .config
         .unwrap_or_else(|| PathBuf::from("./xtable.toml"));
     let config = Config::load(&config_path).context("loading config")?;
+
+    // Hold the telemetry guard for the entire program lifetime. MUST be a
+    // named binding so its `Drop` drains OTel providers on shutdown. MUST
+    // run before `Metrics::new` so the meter handles bind to the live
+    // `SdkMeterProvider` (OTel 0.27 instruments are permanently bound to
+    // the `Meter` that created them).
+    let _guard = xtable_telemetry::init::init(&config.observability.clone().into())?;
 
     info!(
         listen = %config.server.listen,
@@ -95,7 +100,20 @@ async fn main() -> anyhow::Result<()> {
         .into_entry(),
     );
 
-    let state = xtable_server::app::AppState::new(config.clone(), store, backend.clone(), creds);
+    // Bind metric handles AFTER telemetry init. `Metrics::default()` would
+    // bind to the OTel no-op provider and silently drop every recording
+    // for the lifetime of the process; `Metrics::new(&global::meter("xtable"))`
+    // binds to whatever meter provider `init` just installed.
+    let metrics =
+        xtable_telemetry::metrics::Metrics::new(&xtable_telemetry::global::meter("xtable"));
+
+    let state = xtable_server::app::AppState::new(
+        config.clone(),
+        store,
+        backend.clone(),
+        creds,
+        metrics,
+    );
 
     // Spawn GC task.
     spawn_gc(state.clone());
@@ -120,15 +138,6 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     Ok(())
-}
-
-fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
 }
 
 fn spawn_gc(state: xtable_server::app::AppState) {
@@ -167,13 +176,14 @@ fn spawn_flush_loop(state: xtable_server::app::AppState) {
 
 fn build_router(state: xtable_server::app::AppState) -> axum::Router {
     use axum::routing::get;
+    use tower_http::trace::TraceLayer;
+    use xtable_server::red_middleware::red_metrics_middleware;
+    use xtable_telemetry::extract_route::extract_matched_path;
+    use xtable_telemetry::http_semconv::{SemConvMakeSpan, SemConvOnFailure, SemConvOnResponse};
 
     // SigV4 authentication middleware. The structured-data-space routes under
     // /v1 require authentication; /healthz and /readyz are public.
-    let auth_layer = axum::middleware::from_fn_with_state(
-        state.clone(),
-        auth_middleware,
-    );
+    let auth_layer = axum::middleware::from_fn_with_state(state.clone(), auth_middleware);
 
     let admin = axum::Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
@@ -186,8 +196,23 @@ fn build_router(state: xtable_server::app::AppState) -> axum::Router {
     axum::Router::new()
         .merge(admin)
         .merge(structured_routes)
-        .with_state(state)
+        // Outer-first (axum semantics: the last `.layer()` call is the
+        // outermost middleware, so the request traverses layers top-down
+        // and the response bubbles bottom-up). TraceLayer must clone into
+        // each call (axum requires `Layer + Clone`), so we hand it unit
+        // marker types for the semconv adapters — they themselves are
+        // zero-sized `Clone` shims defined in `xtable-telemetry`.
+        .layer(TraceLayer::new_for_http()
+            .make_span_with(SemConvMakeSpan)
+            .on_response(SemConvOnResponse)
+            .on_failure(SemConvOnFailure))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            red_metrics_middleware,
+        ))
+        .layer(middleware::from_fn(extract_matched_path))
         .layer(auth_layer)
+        .with_state(state)
 }
 
 /// SigV4 auth middleware. Rejects unauthenticated requests with 401 before

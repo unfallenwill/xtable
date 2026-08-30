@@ -14,3 +14,8 @@ pub mod resource;
 pub mod shutdown;
 pub mod timed;
 pub mod testing;
+
+// Re-export commonly-needed OTel types so downstream crates (e.g.
+// `xtable-server`) do not need to depend on `opentelemetry` directly.
+pub use opentelemetry::global;
+pub use opentelemetry::KeyValue;

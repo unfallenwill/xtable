@@ -19,8 +19,8 @@ use axum::body::Body;
 use axum::extract::{MatchedPath, Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
-use opentelemetry::KeyValue;
 use std::time::Instant;
+use xtable_telemetry::KeyValue;
 
 use crate::app::AppState;
 

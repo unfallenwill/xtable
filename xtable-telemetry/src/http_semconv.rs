@@ -36,6 +36,12 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub struct SemConvMakeSpan;
 
+impl Clone for SemConvMakeSpan {
+    fn clone(&self) -> Self {
+        Self
+    }
+}
+
 impl<B> MakeSpan<B> for SemConvMakeSpan {
     fn make_span(&mut self, req: &Request<B>) -> Span {
         let route = req
@@ -70,6 +76,12 @@ impl<B> MakeSpan<B> for SemConvMakeSpan {
 
 pub struct SemConvOnResponse;
 
+impl Clone for SemConvOnResponse {
+    fn clone(&self) -> Self {
+        Self
+    }
+}
+
 impl<B> OnResponse<B> for SemConvOnResponse {
     fn on_response(self, response: &Response<B>, latency: Duration, span: &Span) {
         let status = response.status().as_u16();
@@ -103,6 +115,12 @@ impl<B> OnResponse<B> for SemConvOnResponse {
 }
 
 pub struct SemConvOnFailure;
+
+impl Clone for SemConvOnFailure {
+    fn clone(&self) -> Self {
+        Self
+    }
+}
 
 impl<B: std::fmt::Debug> OnFailure<B> for SemConvOnFailure {
     fn on_failure(

@@ -133,3 +133,35 @@ pub fn merge_with_toml(
     cfg.enable_per_table_metrics = toml.enable_per_table_metrics;
     Some(cfg)
 }
+
+/// Build a `TelemetryConfig` from the server's `ObservabilityConfig`.
+///
+/// This conversion deliberately leaves `endpoint` and `protocol` set to
+/// `None` / `OtlpProtocol::default()` so that the env-driven
+/// `OTEL_EXPORTER_OTLP_ENDPOINT` lookup still gates whether the exporter is
+/// installed — i.e. a TOML `observability` block alone does not turn on
+/// telemetry; it only shapes the resource attributes, profile, and
+/// intervals when telemetry is enabled.
+///
+/// Phase 6 (Task 6.2) wires this into `xtable-server/src/main.rs` so the
+/// server can call `xtable_telemetry::init::init(&cfg.observability.into())`
+/// unconditionally — `init` itself returns `Ok(None)` when no endpoint is
+/// configured, keeping telemetry opt-in.
+impl From<xtable_core::config::ObservabilityConfig> for TelemetryConfig {
+    fn from(toml: xtable_core::config::ObservabilityConfig) -> Self {
+        TelemetryConfig {
+            endpoint: None,
+            protocol: OtlpProtocol::default(),
+            service_name: toml.service_name,
+            service_instance_id: toml
+                .service_instance_id
+                .unwrap_or_else(|| ulid::Ulid::new().to_string()),
+            environment: toml.environment,
+            profile: Profile::from_str(&toml.profile).unwrap_or(Profile::Production),
+            trace_sample_ratio: toml.trace_sample_ratio,
+            metric_export_interval_secs: Duration::from_secs(toml.metric_export_interval_secs),
+            shutdown_flush_timeout_secs: Duration::from_secs(toml.shutdown_flush_timeout_secs),
+            enable_per_table_metrics: toml.enable_per_table_metrics,
+        }
+    }
+}

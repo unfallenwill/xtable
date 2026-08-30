@@ -6,6 +6,7 @@ use xtable_auth::{CredentialStore, EdgeAuth};
 use xtable_backend::BackendClient;
 use xtable_schema::StructuredSpace;
 use xtable_storage::LocalStore;
+use xtable_telemetry::metrics::Metrics;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -17,10 +18,11 @@ pub struct AppState {
     /// PR #4: expose the txn coordinator so the background flush loop
     /// can share its memtable set. The structured layer holds a clone.
     pub coordinator: Arc<xtable_tx::TxnCoordinator>,
-    /// OpenTelemetry RED metric handles. Default-constructed against the
-    /// OTel global no-op meter when telemetry is disabled; Phase 6
-    /// replaces this with handles bound to the live `SdkMeterProvider`.
-    pub metrics: xtable_telemetry::metrics::Metrics,
+    /// OpenTelemetry RED metric handles. Phase 6 binds these to the live
+    /// `SdkMeterProvider` in `main.rs` *after* `telemetry::init` runs; the
+    /// caller is responsible for sequencing — see the comment on
+    /// `Metrics::default()` in `xtable-telemetry/src/metrics.rs`.
+    pub metrics: Metrics,
 }
 
 impl std::fmt::Debug for AppState {
@@ -35,6 +37,7 @@ impl AppState {
         store: LocalStore,
         backend: BackendClient,
         creds: Arc<CredentialStore>,
+        metrics: Metrics,
     ) -> Self {
         let cfg = Arc::new(config.clone());
         let auth = Arc::new(EdgeAuth {
@@ -64,7 +67,7 @@ impl AppState {
             auth,
             structured,
             coordinator: Arc::clone(&txn),
-            metrics: xtable_telemetry::metrics::Metrics::default(),
+            metrics,
         }
     }
 }
