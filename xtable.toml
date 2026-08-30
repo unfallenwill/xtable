@@ -40,3 +40,12 @@ max_staged_bytes = 109951162777600   # 100 GiB
 [observability]
 otlp_endpoint = ""
 metrics_listen = "127.0.0.1:9090"
+
+# [observability]
+# service_name = "xtable"
+# environment = "production"
+# profile = "production"        # dev | staging | production | debug
+# trace_sample_ratio = 0.05
+# metric_export_interval_secs = 60
+# shutdown_flush_timeout_secs = 10
+# enable_per_table_metrics = false
