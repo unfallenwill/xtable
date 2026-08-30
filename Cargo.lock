@@ -4111,6 +4111,7 @@ dependencies = [
  "xtable-core",
  "xtable-schema",
  "xtable-storage",
+ "xtable-telemetry",
  "xtable-tx",
 ]
 
@@ -4148,7 +4149,9 @@ name = "xtable-telemetry"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
+ "futures",
  "hostname",
  "http 1.5.0",
  "opentelemetry",

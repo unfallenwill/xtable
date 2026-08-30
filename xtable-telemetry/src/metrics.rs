@@ -263,3 +263,19 @@ impl Metrics {
         }
     }
 }
+
+impl Default for Metrics {
+    /// Fallback handle set when telemetry has not been initialised.
+    ///
+    /// The `Default` impl uses the process-wide global meter, which OTel 0.27
+    /// supplies with a no-op provider until `global::set_meter_provider(...)`
+    /// is called. Every instrument handle still type-checks, so callers like
+    /// `xtable-server`'s RED middleware can record against `state.metrics`
+    /// unconditionally — recordings are silently dropped when no exporter is
+    /// attached, and start flowing as soon as `telemetry::init()` wires a
+    /// real `SdkMeterProvider`.
+    fn default() -> Self {
+        let meter = opentelemetry::global::meter("xtable");
+        Self::new(&meter)
+    }
+}

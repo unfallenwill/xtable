@@ -10,7 +10,6 @@ pub mod init;
 pub mod metrics;
 pub mod profiles;
 pub mod providers;
-pub mod red_middleware;
 pub mod resource;
 pub mod shutdown;
 pub mod timed;

@@ -17,6 +17,10 @@ pub struct AppState {
     /// PR #4: expose the txn coordinator so the background flush loop
     /// can share its memtable set. The structured layer holds a clone.
     pub coordinator: Arc<xtable_tx::TxnCoordinator>,
+    /// OpenTelemetry RED metric handles. Default-constructed against the
+    /// OTel global no-op meter when telemetry is disabled; Phase 6
+    /// replaces this with handles bound to the live `SdkMeterProvider`.
+    pub metrics: xtable_telemetry::metrics::Metrics,
 }
 
 impl std::fmt::Debug for AppState {
@@ -60,6 +64,7 @@ impl AppState {
             auth,
             structured,
             coordinator: Arc::clone(&txn),
+            metrics: xtable_telemetry::metrics::Metrics::default(),
         }
     }
 }
