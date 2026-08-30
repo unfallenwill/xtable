@@ -1,15 +1,26 @@
 //! Telemetry init: layered subscriber + propagator + provider glue.
 //!
-//! `install_subscriber` installs the layered `tracing_subscriber`
-//! registry with an OTLP trace layer (one filter per layer), a stdout
-//! JSON layer (another filter), and a default `RUST_LOG`-aware
-//! EnvFilter as the base filter. `install_log_provider` installs the
-//! OTel appender bridge so `tracing` events also become OTel
-//! `LogRecord`s. The orchestrating `init()` is added in a follow-up
-//! task (Phase 4.7).
+//! Wiring breakdown:
+//! 1. `install_subscriber` installs the layered `tracing_subscriber`
+//!    registry with an OTLP trace layer (one filter per layer), a
+//!    stdout JSON layer (another filter), and a default
+//!    `RUST_LOG`-aware EnvFilter as the base filter.
+//! 2. `install_log_provider` installs the OTel appender bridge so
+//!    `tracing` events also become OTel `LogRecord`s.
+//! 3. `init` orchestrates everything: builds the resource, the three
+//!    providers (tracer / meter / log), installs them and the W3C
+//!    TraceContext + W3C Baggage propagators (composed together), then
+//!    returns a `TelemetryGuard` that owns the providers and drains
+//!    them on `Drop`.
+//!
+//! Returns `Ok(None)` when no OTLP endpoint is configured (telemetry
+//! disabled) — callers can wire it in unconditionally with
+//! `let _guard = telemetry::init(&cfg)?;`.
 
 use anyhow::Context;
+use opentelemetry::propagation::TextMapCompositePropagator;
 use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_sdk::propagation::{BaggagePropagator, TraceContextPropagator};
 use opentelemetry_sdk::trace::TracerProvider as SdkTracerProvider;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -17,6 +28,9 @@ use tracing_subscriber::Layer as _;
 
 use crate::config::TelemetryConfig;
 use crate::profiles::{env_filter_for_layer, Layer};
+use crate::providers::{build_meter_provider, build_tracer_provider, install_log_appender};
+use crate::resource::build_resource;
+use crate::shutdown::TelemetryGuard;
 
 /// Install the layered `tracing_subscriber` registry.
 ///
@@ -78,4 +92,59 @@ pub fn install_log_provider(
         .try_init()
         .context("install log bridge")?;
     Ok(())
+}
+
+/// One-shot orchestrator: build providers, install subscribers and
+/// propagators, return a `TelemetryGuard`.
+///
+/// When `cfg.endpoint` is unset or empty the function returns `Ok(None)`
+/// — telemetry is treated as opt-in. The caller still holds a regular
+/// `Result` so wiring can be unconditional:
+/// `let _guard = telemetry::init(&cfg)?;` and ignore the option.
+///
+/// Propagators: per spec §12 (Baggage), both W3C TraceContext and W3C
+/// Baggage must be active. OTel 0.27 only supports a single global
+/// propagator at a time, so we compose them via the API-level
+/// `TextMapCompositePropagator` (the 0.27 type lives in
+/// `opentelemetry::propagation`) before handing it to
+/// `global::set_text_map_propagator`.
+pub fn init(cfg: &TelemetryConfig) -> anyhow::Result<Option<TelemetryGuard>> {
+    // Telemetry is opt-in: bail early when no endpoint is configured.
+    let endpoint = match cfg.endpoint.as_deref() {
+        Some(e) if !e.trim().is_empty() => e,
+        _ => return Ok(None),
+    };
+
+    // W3C TraceContext + W3C Baggage, composed into a single global
+    // propagator. The brief's snippet had a placeholder block here that
+    // constructed a propagator and immediately dropped it; we replace
+    // it with a real composite that actually exercises BaggagePropagator
+    // (spec §12 requires both TraceContext AND Baggage headers to be
+    // propagated across service boundaries).
+    let composite = TextMapCompositePropagator::new(vec![
+        Box::new(TraceContextPropagator::new()),
+        Box::new(BaggagePropagator::new()),
+    ]);
+    opentelemetry::global::set_text_map_propagator(composite);
+
+    let resource = build_resource(cfg);
+    let tracer = build_tracer_provider(cfg, resource.clone())?;
+    let meter = build_meter_provider(cfg, resource.clone())?;
+    let log = install_log_appender(cfg, resource)?;
+
+    install_subscriber(cfg, &tracer)?;
+    install_log_provider(&log)?;
+
+    tracing::info!(
+        otel_endpoint = %endpoint,
+        profile = ?cfg.profile,
+        "OpenTelemetry enabled"
+    );
+
+    Ok(Some(TelemetryGuard::new(
+        tracer,
+        meter,
+        log,
+        cfg.shutdown_flush_timeout_secs,
+    )))
 }
