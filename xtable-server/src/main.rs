@@ -95,10 +95,14 @@ async fn main() -> anyhow::Result<()> {
         .into_entry(),
     );
 
-    let state = xtable_server::app::AppState::new(config.clone(), store, backend, creds);
+    let state = xtable_server::app::AppState::new(config.clone(), store, backend.clone(), creds);
 
     // Spawn GC task.
     spawn_gc(state.clone());
+
+    // Spawn memtable flush loop (PR #4). Drains immutable memtables
+    // into S3 chunks via multipart upload.
+    spawn_flush_loop(state.clone());
 
     let app = build_router(state);
 
@@ -143,6 +147,21 @@ fn spawn_gc(state: xtable_server::app::AppState) {
                 Err(e) => warn!(err = %e, "GC sweep failed"),
             }
         }
+    });
+}
+
+/// Spawn the memtable-to-S3 chunk flush loop (PR #4). This task
+/// picks up immutable memtables produced by the active memtable and
+/// uploads them as chunks.
+fn spawn_flush_loop(state: xtable_server::app::AppState) {
+    use std::sync::Arc;
+    use xtable_storage::flush::flush_loop;
+
+    let backend = state.backend.clone();
+    let store = state.store.clone();
+    let memtable_set = Arc::clone(state.coordinator.memtable_set());
+    tokio::spawn(async move {
+        let _ = flush_loop(memtable_set, store, backend).await;
     });
 }
 

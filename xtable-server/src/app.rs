@@ -14,6 +14,9 @@ pub struct AppState {
     pub backend: Arc<BackendClient>,
     pub auth: Arc<EdgeAuth>,
     pub structured: Arc<StructuredSpace>,
+    /// PR #4: expose the txn coordinator so the background flush loop
+    /// can share its memtable set. The structured layer holds a clone.
+    pub coordinator: Arc<xtable_tx::TxnCoordinator>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -46,7 +49,7 @@ impl AppState {
             config.txn.commit_upload_concurrency,
         ));
         let structured = Arc::new(StructuredSpace::new(
-            txn,
+            Arc::clone(&txn),
             store.clone(),
             Arc::clone(&backend_arc),
         ));
@@ -56,6 +59,7 @@ impl AppState {
             backend: backend_arc,
             auth,
             structured,
+            coordinator: Arc::clone(&txn),
         }
     }
 }

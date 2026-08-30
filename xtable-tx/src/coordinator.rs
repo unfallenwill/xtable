@@ -1,15 +1,17 @@
-//! Transaction coordinator — OCC state machine.
+//! Transaction coordinator — MVCC + Cahill SSI state machine.
 //!
 //! Protocol order (critical for crash-safety):
-//! 1. BeginTxn → TxnId + snapshot_version, WAL `Begin`
-//! 2. Stage (per PutObject in txn) → WAL `Stage` + WriteSetEntry
+//! 1. BeginTxn → TxnId + snapshot_version, WAL `Begin` + register SI txn
+//! 2. Stage (per PutObject in txn) → WAL `Stage` + WriteSetEntry +
+//!    register SI write intent (lock_manager.register_write)
 //! 3. CommitTxn:
-//!    a. Validate: every write_key's `version_at_read` must equal `current_version`
-//!    b. Upload all keys to backend S3 with `x-amz-meta-xtable-version` metadata
-//!       (in parallel via JoinSet)
-//!    c. Bulk-put version records to redb versions table (single write txn)
-//!    d. WAL `Committing` → `Committed` → `CommitResult` (single write txn)
-//!    e. Schedule staged-body GC
+//!    a. Cahill cycle detection (lock_manager.find_dangerous_structure)
+//!       → abort on dangerous structure (Conflict)
+//!    b. Upload all keys to backend S3 (single PUT or multipart)
+//!    c. Atomic redb write txn: append_chain_entries_bulk with
+//!       snapshot-conflict check (prevents lost-update) + memtable publish
+//!    d. WAL `Committed` + Mark committed on SI lock manager
+//!    e. Fire post-commit hooks (record_index update)
 //! 4. On any failure during upload, compensating-delete already-uploaded keys,
 //!    WAL `Aborted`, return 409 / 503.
 
@@ -27,11 +29,12 @@ use xtable_backend::{BackendClient, BackendError};
 use xtable_core::headers::TxnStatus;
 use xtable_core::{ObjectKey, TxnId, Version, XtableError, XtableResult};
 use xtable_storage::{
-    BlobRecord, LocalStore, ReadSetEntry, TxnStateRecord, VersionRecord, WalRecord,
-    WriteSetEntry,
+    BlobRecord, LocalStore, MemEntry, MemTableSet, RecordValue, TxnStateRecord, VersionRecord,
+    WalRecord, WriteSetEntry,
 };
 
 use crate::error::TxnError;
+use crate::si_lock_manager::SiLockManager;
 
 /// Outcome of a successful CommitTxn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,12 +75,13 @@ pub struct TxnCoordinator {
     spill_dir: Arc<std::path::PathBuf>,
     /// Optional concurrency limit for parallel backend uploads.
     upload_concurrency: Arc<Semaphore>,
-    /// V5 fix: per-coordinator commit mutex serializes the commit
-    /// critical section (validate → upload → chain append → WAL Committed).
-    /// redb already serializes individual ops, but without this lock
-    /// the validate → upload window leaves room for concurrent commits on
-    /// the same key to interleave and silently overwrite each other.
-    commit_lock: Arc<tokio::sync::Mutex<()>>,
+    /// PR #4: Cahill SSI lock manager. Tracks per-txn SIRead/SIWrite locks
+    /// and rw-antidependency edges; commit-time cycle detection aborts
+    /// txns that participate in dangerous structures.
+    lock_manager: Arc<SiLockManager>,
+    /// PR #4: in-memory MemTable set. Commit publishes to memtable; a
+    /// background flush task uploads chunks to S3.
+    memtable_set: Arc<MemTableSet>,
     /// Post-commit hooks (e.g., index maintenance for the structured-data-space layer).
     post_commit_hooks: Arc<std::sync::RwLock<Vec<PostCommitHook>>>,
 }
@@ -101,13 +105,44 @@ impl TxnCoordinator {
             backend,
             spill_dir: Arc::new(spill_dir),
             upload_concurrency: Arc::new(Semaphore::new(upload_concurrency.max(1))),
-            // V5 fix: per-coordinator commit mutex. Within a single
-            // xtable-server process, only one commit can be in its
-            // critical section at a time. redb still provides per-key
-            // atomicity at the storage layer.
-            commit_lock: Arc::new(tokio::sync::Mutex::new(())),
+            // PR #4: default SI lock manager + memtable set.
+            lock_manager: SiLockManager::new(),
+            memtable_set: MemTableSet::new(
+                xtable_storage::MemTable::new(0),
+                xtable_storage::FlushPolicy::default(),
+            ),
             post_commit_hooks: Arc::new(std::sync::RwLock::new(Vec::new())),
         }
+    }
+
+    /// Construct with explicit SI lock manager and memtable set (used by
+    /// tests and by server startup to wire shared instances).
+    pub fn with_lock_and_memtable(
+        store: Arc<LocalStore>,
+        backend: Arc<BackendClient>,
+        spill_dir: std::path::PathBuf,
+        upload_concurrency: usize,
+        lock_manager: Arc<SiLockManager>,
+        memtable_set: Arc<MemTableSet>,
+    ) -> Self {
+        std::fs::create_dir_all(&spill_dir).ok();
+        Self {
+            store,
+            backend,
+            spill_dir: Arc::new(spill_dir),
+            upload_concurrency: Arc::new(Semaphore::new(upload_concurrency.max(1))),
+            lock_manager,
+            memtable_set,
+            post_commit_hooks: Arc::new(std::sync::RwLock::new(Vec::new())),
+        }
+    }
+
+    pub fn lock_manager(&self) -> &Arc<SiLockManager> {
+        &self.lock_manager
+    }
+
+    pub fn memtable_set(&self) -> &Arc<MemTableSet> {
+        &self.memtable_set
     }
 
     pub fn store(&self) -> &LocalStore {
@@ -146,6 +181,10 @@ impl TxnCoordinator {
         let now_ms = Utc::now().timestamp_millis();
         let rec = TxnStateRecord::new_active(snapshot_version, idempotency_key.clone(), now_ms);
         self.store.put_txn_state(&txn_id, &rec)?;
+        // PR-Fix1.1: register the txn in the SI lock manager so that
+        // `register_read` / `register_write` / `find_dangerous_structure`
+        // see it. Without this the lock manager stays empty and SSI is dead.
+        self.lock_manager.begin_txn(&txn_id, snapshot_version)?;
         // MVCC: register the snapshot so it pins old versions from GC.
         self.store.register_snapshot(snapshot_version)?;
         self.store.append_wal(&WalRecord::Begin {
@@ -171,11 +210,6 @@ impl TxnCoordinator {
     ) -> XtableResult<()> {
         let mut txn = self.require_active(txn_id)?;
 
-        // V16 fix: version_at_read must be the txn's snapshot_version
-        // (captured at begin), not the chain's latest_commit_version at
-        // stage time. Otherwise a concurrent commit between begin and stage
-        // would shift version_at_read, hiding lost updates (write skew).
-        let version_at_read = txn.snapshot_version;
         // Note: no threshold check — the threshold concept was a mis-design
         // that caused V18 (every txn after the first got rejected).
 
@@ -202,7 +236,6 @@ impl TxnCoordinator {
             txn_id: txn_id.to_string(),
             key: key.as_str().to_string(),
             body_handle: body_handle.clone(),
-            version_at_read,
         })?;
 
         let entry = WriteSetEntry {
@@ -212,7 +245,6 @@ impl TxnCoordinator {
             size: body.len() as u64,
             content_type,
             user_meta: user_meta.into_iter().collect(),
-            version_at_read,
             deleted,
         };
         self.store.put_write_entry(txn_id, key.as_str(), &entry)?;
@@ -221,14 +253,42 @@ impl TxnCoordinator {
             txn.write_keys.push(key.as_str().to_string());
             self.store.put_txn_state(txn_id, &txn)?;
         }
+        // PR #4: register the SI write intent. The version we register
+        // is `txn.snapshot_version + 1` — this is the commit_version that
+        // would be allocated at commit time (an over-estimate is fine; the
+        // actual commit_version is decided atomically in `commit`).
+        let next_version = txn.snapshot_version.saturating_add(1);
+        self.lock_manager.register_write(
+            txn_id,
+            key.as_str(),
+            next_version,
+        );
         Ok(())
     }
 
     /// Touch a key for read tracking (within txn).
-    pub async fn read(&self, txn_id: &str, key: &ObjectKey, observed_version: Version, observed_etag: String) -> XtableResult<()> {
+    ///
+    /// PR-Fix8.2: actually register the read with the SI lock manager
+    /// so Cahill cycle detection sees it. Without this, write-skew
+    /// scenarios (T1 reads X/Y + writes X; T2 reads X/Y + writes Y)
+    /// would commit on both sides and break serializability.
+    pub async fn read(
+        &self,
+        txn_id: &str,
+        key: &ObjectKey,
+        observed_version: Version,
+        observed_etag: String,
+    ) -> XtableResult<()> {
         let mut txn = self.require_active(txn_id)?;
-        let entry = ReadSetEntry { version_observed: observed_version.as_u64(), etag_observed: observed_etag };
-        self.store.put_read_entry(txn_id, key.as_str(), &entry)?;
+        // PR-Fix8.2: SI lock acquisition.
+        self.lock_manager.register_read(
+            txn_id,
+            key.as_str(),
+            observed_version.as_u64(),
+            observed_etag,
+        );
+        // Observability: keep `txn.read_keys` so admin tools / debug can
+        // see what was read.
         if !txn.read_keys.iter().any(|k| k == key.as_str()) {
             txn.read_keys.push(key.as_str().to_string());
             self.store.put_txn_state(txn_id, &txn)?;
@@ -236,13 +296,13 @@ impl TxnCoordinator {
         Ok(())
     }
 
-    /// Commit a transaction. Implements the OCC validate-then-publish protocol.
+    /// Commit a transaction. PR #3 removed the OCC validate phase; PR #4
+    /// wires the SI lock manager + MemTable publish into `commit_inner`.
     pub async fn commit(&self, txn_id: &str) -> XtableResult<CommitOutcome> {
-        // V5 fix: serialize the commit critical section across the whole
-        // coordinator. Combined with V4 (OCC reads chain) and V16
-        // (version_at_read = snapshot_version), concurrent commits on the
-        // same key now strictly serialize at this point.
-        let _guard = self.commit_lock.lock().await;
+        // PR #3: `commit_lock` removed. The SI lock manager's interior
+        // mutex provides equivalent serialization for the per-txn
+        // critical section. Cross-txn serialization on the same key is
+        // handled by `append_chain_entries_bulk`'s monotonicity check.
         self.commit_inner(txn_id).await
     }
 
@@ -257,7 +317,7 @@ impl TxnCoordinator {
             if rec.status == TxnStatus::Aborted {
                 return Err(TxnError::Aborted("txn already aborted".into()).into());
             }
-            if rec.status == TxnStatus::Validating || rec.status == TxnStatus::Committing {
+            if rec.status == TxnStatus::Committing {
                 // Mid-flight from a previous crashed instance — conservative abort.
                 return Err(TxnError::InvalidState(format!("txn in {:?} state", rec.status)).into());
             }
@@ -267,45 +327,27 @@ impl TxnCoordinator {
 
         let mut txn = self.store.get_txn_state(txn_id)?
             .ok_or_else(|| TxnError::UnknownTxn(txn_id.to_string()))?;
-        txn.status = TxnStatus::Validating;
-        self.store.put_txn_state(txn_id, &txn)?;
-
-        // 2. OCC validation: read current versions from the MVCC chain (NOT the
-        // legacy TBL_VERSIONS, which is no longer kept in sync). This is the
-        // fix for V4: commit validation must read the same source of truth
-        // that commit publishes to.
-        //
-        // OCC semantics: a write conflict exists if and only if the key was
-        // modified *after* this txn's snapshot_version. So we flag conflict
-        // when `current > version_at_read`. Keys that are unchanged since
-        // our snapshot (current ≤ version_at_read, including brand-new keys
-        // where current = 0) are fine.
         let write_entries = self.store.iter_write_set(txn_id)?;
-        let mut conflict_keys: Vec<String> = Vec::new();
-        for (key, entry) in &write_entries {
-            let current = self.store
-                .read_chain(key)
-                .map(|c| c.latest_commit_version())?;
-            if current > entry.version_at_read {
-                conflict_keys.push(key.clone());
-            }
-        }
-        if !conflict_keys.is_empty() {
+
+        // PR #4: Cahill cycle detection. Reads in-edges and out-edges on
+        // this txn; if any peer appears in both, abort.
+        if let Some(peer) = self.lock_manager.find_dangerous_structure(txn_id) {
             self.store.append_wal(&WalRecord::Aborted {
                 txn_id: txn_id.to_string(),
-                reason: format!("OCC conflict on keys: {}", conflict_keys.join(",")),
+                reason: format!("Cahill cycle with {}", peer),
             })?;
             txn.status = TxnStatus::Aborted;
             self.store.put_txn_state(txn_id, &txn)?;
-            return Err(TxnError::Conflict(conflict_keys.join(",")).into());
+            self.lock_manager.mark_aborted(txn_id);
+            let _ = self.store.unregister_snapshot(txn.snapshot_version);
+            return Err(TxnError::Conflict(format!("SSI cycle with {}", peer)).into());
         }
 
-        // 3. ValidateOk — about to upload.
         txn.status = TxnStatus::Committing;
-        self.store.append_wal(&WalRecord::ValidateOk {
-            txn_id: txn_id.to_string(),
-            write_keys: txn.write_keys.clone(),
-        })?;
+        self.store.put_txn_state(txn_id, &txn)?;
+
+        // PR #3: OCC validate removed. Conflict detection moves to the
+        // SI lock manager via `find_dangerous_structure()` at commit.
 
         // 4. Allocate new versions per key. Sort for deterministic ordering.
         let mut sorted_keys: Vec<String> = txn.write_keys.clone();
@@ -323,6 +365,32 @@ impl TxnCoordinator {
         // whose uploads may have succeeded. Without this ordering, a crash
         // between upload and WAL Committing looks like "no uploads" to
         // recovery and orphans + dirty-read.
+        // PR-Fix9.2: pre-upload snapshot conflict check. If any write_key
+        // has been written by a concurrent txn AFTER our snapshot, we must
+        // refuse BEFORE uploading — otherwise the upload would overwrite
+        // the live key and the chain rollback wouldn't recover the S3 state.
+        // Cheap read-only check; protects against lost-update.
+        for key in &sorted_keys {
+            let chain = self.store.read_chain(key)?;
+            let latest = chain.latest_commit_version();
+            if !chain.entries.is_empty() && latest > txn.snapshot_version {
+                self.store.append_wal(&WalRecord::Aborted {
+                    txn_id: txn_id.to_string(),
+                    reason: format!(
+                        "snapshot conflict on {}: our snapshot {}, chain latest {}",
+                        key, txn.snapshot_version, latest
+                    ),
+                })?;
+                txn.status = TxnStatus::Aborted;
+                self.store.put_txn_state(txn_id, &txn)?;
+                let _ = self.store.unregister_snapshot(txn.snapshot_version);
+                return Err(XtableError::Conflict(format!(
+                    "{}: snapshot {} < chain latest {}",
+                    key, txn.snapshot_version, latest
+                )).into());
+            }
+        }
+
         self.store.append_wal(&WalRecord::Committing {
             txn_id: txn_id.to_string(),
             upload_keys: alloc_versions.iter().map(|(k, _)| k.clone()).collect(),
@@ -426,7 +494,7 @@ impl TxnCoordinator {
         //  - I1 (chain monotonic): enforced by append_chain_entries_bulk
         //  - I6 (atomicity): all entries appended in a single redb write txn
         // V10: deleted entries get a tombstone VersionEntry.
-        let mut entries: Vec<(String, xtable_storage::VersionEntry)> = Vec::with_capacity(alloc_versions.len());
+        let mut entries: Vec<(String, xtable_storage::VersionEntry, u64)> = Vec::with_capacity(alloc_versions.len());
         for (k, v) in &alloc_versions {
             let write_entry = write_entries.iter().find(|(kk, _)| kk == k);
             let is_deleted = write_entry.map(|(_, e)| e.deleted).unwrap_or(false);
@@ -445,9 +513,11 @@ impl TxnCoordinator {
                     size,
                 )
             };
-            entries.push((k.clone(), entry));
+            // PR-Fix9.2: include this txn's snapshot_version so the
+            // bulk append can detect snapshot conflicts atomically.
+            entries.push((k.clone(), entry, txn.snapshot_version));
         }
-        self.store.append_chain_entries_bulk(&entries)?;
+self.store.append_chain_entries_bulk(&entries)?;
 
         // V4 fix: keep TBL_VERSIONS in sync with the chain. Even though
         // OCC validation now reads the chain directly, TBL_VERSIONS is
@@ -491,12 +561,57 @@ impl TxnCoordinator {
         txn.status = TxnStatus::Committed;
         self.store.put_txn_state(txn_id, &txn)?;
 
+        // PR #4: publish entries to memtable. Each write becomes visible
+        // at `commit_version` for reads at-or-after that snapshot. A
+        // background flush task encodes the immutable memtable into a
+        // chunk and uploads to S3 (see `flush_loop`).
+        //
+        // Memtable uses space="" / table="" for non-structured records.
+        // Structured records (which have a space/table) get the same
+        // empty pair here; the structured layer maintains its own index
+        // via post-commit hooks.
+        for (key, we) in &write_entries {
+            let body = match &we.inline_body {
+                Some(b) => bytes::Bytes::copy_from_slice(b.as_slice()),
+                None => match &we.body_handle {
+                    Some(_) => bytes::Bytes::new(), // spill file — not loaded here
+                    None => bytes::Bytes::new(),
+                },
+            };
+            let mem_key: xtable_storage::memtable::RecordKey =
+                (String::new(), String::new(), key.clone());
+            let cv_atomic = Arc::new(std::sync::atomic::AtomicU64::new(commit_version));
+            let mem_entry = MemEntry {
+                key: mem_key,
+                value: Arc::new(RecordValue { bytes: body }),
+                commit_version: cv_atomic,
+                txn_id: txn_id.to_string(),
+                deleted: we.deleted,
+                content_type: we.content_type.clone(),
+                user_meta: we.user_meta.clone(),
+                schema_version: 0,
+                wal_seq: commit_version,
+                size_bytes: we.size,
+            };
+            // Memtable write is best-effort — chain append is already durable.
+            let _ = self.memtable_set.put_invisible(mem_entry);
+            self.memtable_set.publish(
+                &(String::new(), String::new(), key.clone()),
+                commit_version,
+                commit_version,
+            );
+        }
+
+        // PR #4: mark the txn as recently committed in the SI lock
+        // manager so future commits can still detect dangerous structures.
+        self.lock_manager.mark_committed(txn_id, commit_version);
+
         // 9b. Fire post-commit hooks. After this point observers can
         // reconcile their own indexes (record / schema index in the
         // structured-data-space layer).
         let writes = entries
             .iter()
-            .map(|(k, e)| CommitWrite {
+            .map(|(k, e, _snap)| CommitWrite {
                 key: k.clone(),
                 commit_version: e.commit_version,
                 deleted: e.deleted,

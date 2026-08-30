@@ -91,7 +91,17 @@ async fn get_schema(
 ) -> Response {
     let snap = params.snapshot.as_deref().and_then(|s| s.parse::<u64>().ok());
     let version = params.version.as_deref().and_then(|s| s.parse::<u32>().ok());
-    match state.structured.get_schema(&space, &name, version, snap).await {
+    // PR #6: wrap read in a short-lived txn for SSI ReadSet capture.
+    let txn = match state.structured.begin_txn().await {
+        Ok(t) => t,
+        Err(e) => return error_response(e),
+    };
+    let result = state
+        .structured
+        .get_schema(&txn, &space, &name, version, snap)
+        .await;
+    let _ = state.structured.abort_txn(&txn).await;
+    match result {
         Ok(Some(info)) => (
             StatusCode::OK,
             Json(json!({
@@ -111,7 +121,13 @@ async fn list_schemas(
     State(state): State<Arc<AppState>>,
     Path(space): Path<String>,
 ) -> Response {
-    match state.structured.list_schemas(&space).await {
+    let txn = match state.structured.begin_txn().await {
+        Ok(t) => t,
+        Err(e) => return error_response(e),
+    };
+    let result = state.structured.list_schemas(&txn, &space).await;
+    let _ = state.structured.abort_txn(&txn).await;
+    match result {
         Ok(items) => (
             StatusCode::OK,
             Json(json!({
@@ -223,7 +239,15 @@ async fn get_record(
     Query(params): Query<GetRecordQuery>,
 ) -> Response {
     let snap = params.snapshot.as_deref().and_then(|s| s.parse::<u64>().ok());
-    match state.structured.get_record(&space, &table, &record_id, snap) {
+    let txn = match state.structured.begin_txn().await {
+        Ok(t) => t,
+        Err(e) => return error_response(e),
+    };
+    let result = state
+        .structured
+        .get_record(&txn, &space, &table, &record_id, snap);
+    let _ = state.structured.abort_txn(&txn).await;
+    match result {
         Ok(Some(r)) => (
             StatusCode::OK,
             Json(json!({
@@ -307,7 +331,15 @@ async fn query_records(
     if let Some(o) = params.offset.as_deref().and_then(|s| s.parse::<usize>().ok()) {
         q = q.offset(o);
     }
-    match state.structured.query_records(&space, &table, q, snap) {
+    let txn = match state.structured.begin_txn().await {
+        Ok(t) => t,
+        Err(e) => return error_response(e),
+    };
+    let result = state
+        .structured
+        .query_records(&txn, &space, &table, q, snap);
+    let _ = state.structured.abort_txn(&txn).await;
+    match result {
         Ok(res) => (
             StatusCode::OK,
             Json(json!({
@@ -366,7 +398,15 @@ async fn diff_records(
         (Ok(a), Ok(b)) => (a, b),
         _ => return error_response(XtableError::invalid("s1 and s2 must be u64")),
     };
-    match state.structured.diff(&space, &table, s1, s2) {
+    let txn = match state.structured.begin_txn().await {
+        Ok(t) => t,
+        Err(e) => return error_response(e),
+    };
+    let result = state
+        .structured
+        .diff(&txn, &space, &table, s1, s2);
+    let _ = state.structured.abort_txn(&txn).await;
+    match result {
         Ok(items) => (
             StatusCode::OK,
             Json(json!({

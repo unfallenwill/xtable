@@ -49,7 +49,6 @@ pub struct WriteSetEntry {
     pub size: u64,
     pub content_type: Option<String>,
     pub user_meta: Vec<(String, String)>,
-    pub version_at_read: u64,
     /// True if this staged write is a delete (tombstone). Fix for V10.
     #[serde(default)]
     pub deleted: bool,

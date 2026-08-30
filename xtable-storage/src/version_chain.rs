@@ -9,7 +9,7 @@
 //! - aborted txns leave no entry
 //! - read at snapshot S returns entry with `commit_version ≤ S` (newest)
 //! - read-your-own-writes within a txn
-//! - OCC conflict semantics preserved (uses chain newest ≤ version_at_read)
+//! - Snapshot conflict semantics: append_chain_entries_bulk checks chain newest ≤ snapshot_version
 //! - multi-object commit is atomic
 //! - WAL replay recovers equivalent chain state
 //! - GC safety

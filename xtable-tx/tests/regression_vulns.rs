@@ -253,7 +253,6 @@ async fn unit_v10_write_set_entry_preserves_deleted_flag() {
         size: 0,
         content_type: None,
         user_meta: vec![],
-        version_at_read: 1,
         deleted: false,
     };
     entry.deleted = true;
@@ -592,10 +591,13 @@ async fn unit_v16_version_at_read_is_snapshot() {
     let txn = coord.begin(None).await.unwrap();
     // Now bump global_version further (simulates concurrent commit).
     for _ in 0..3 { let _ = store.next_global_version().unwrap(); }
-    // Stage — version_at_read should be 5 (snapshot at begin), NOT 8 (chain latest).
+    // Stage — PR #3 removed version_at_read. The txn's snapshot_version
+// is now stored on TxnStateRecord, not WriteSetEntry.
     coord.stage(&txn, &ObjectKey::new("k"), b"v".to_vec(), None, HashMap::new(), false).await.unwrap();
     let ws = store.iter_write_set(&txn).unwrap();
-    assert_eq!(ws[0].1.version_at_read, 5, "must use snapshot_version, not chain latest (8)");
+    assert_eq!(ws.len(), 1);
+    let state = store.get_txn_state(&txn).unwrap().unwrap();
+    assert_eq!(state.snapshot_version, 5);
 }
 
 // =========================================================================

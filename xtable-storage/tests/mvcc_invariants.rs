@@ -125,7 +125,6 @@ proptest! {
                 size: 1,
                 content_type: None,
                 user_meta: vec![],
-                version_at_read,
                 deleted: false,
             }).unwrap();
             // Txn B's commit_version gets allocated as version_at_read + 1.
@@ -158,7 +157,8 @@ proptest! {
             // Simulate a successful commit: all keys get one entry at commit_v.
             let mut entries = Vec::new();
             for k in &keys {
-                entries.push((k.clone(), entry(commit_v, k, 10)));
+                // Cold-rebuild-style: snapshot = u64::MAX (no conflict).
+                entries.push((k.clone(), entry(commit_v, k, 10), u64::MAX));
             }
             store.append_chain_entries_bulk(&entries).unwrap();
             // Now every key's chain must have the committed entry.

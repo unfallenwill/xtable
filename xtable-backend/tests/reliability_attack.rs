@@ -217,7 +217,10 @@ async fn stage(coord: &TxnCoordinator, txn: &str, key: &str, body: &[u8]) {
 // =========================================================================
 
 #[tokio::test]
-async fn poc1_occ_never_conflicts_between_two_txns() {
+async fn poc1_ssi_write_write_conflict_aborts_second_txn() {
+    // PR-Fix9.1: snapshot conflict check in append_chain_entries_bulk
+    // detects lost-update. Two txns at the same snapshot writing the
+    // same key — only one may commit.
     let (coord, store, _backend, mock, _tmp) = setup().await;
 
     let t1 = coord.begin(None).await.unwrap();
@@ -226,24 +229,16 @@ async fn poc1_occ_never_conflicts_between_two_txns() {
     stage(&coord, &t2, "k", b"B").await;
 
     coord.commit(&t1).await.unwrap();
-
-    // The second commit must return a conflict (lost-update protection).
-    // Before the fix it returned Ok because TBL_VERSIONS was never updated
-    // on commit, so version_at_read was always 0 and the check always passed.
     let second = coord.commit(&t2).await;
     assert!(second.is_err(),
-        "V4: OCC did not detect write-write conflict on the same key");
-
-    // TBL_VERSIONS must reflect the committed version after t1 commits.
-    assert!(store.get_version(&ObjectKey::new("k")).unwrap().is_some(),
-        "V4: TBL_VERSIONS was not updated on commit — OCC check has no ground truth");
+        "snapshot conflict: t2 must not silently overwrite t1");
 
     // t1's value must be preserved; t2's write must not reach the backend.
     assert_eq!(mock.get("k").unwrap(), b"A",
-        "V4: lost update — t2 silently overwrote t1's commit");
+        "lost update: t2 silently overwrote t1");
     let chain = store.read_chain("k").unwrap();
     assert_eq!(chain.entries.len(), 1,
-        "V4: only t1's write should be in the version chain (t2 rejected)");
+        "only t1's write should be in the version chain (t2 rejected)");
 }
 
 // =========================================================================
@@ -261,10 +256,8 @@ async fn poc2_recovery_deletes_published_commit() {
     // append_chain_entries_bulk (line ~306) and WAL Committed (line ~311):
     // chain entry + backend object are already published, only the WAL
     // Committed record is missing.
-    store.append_wal(&WalRecord::ValidateOk {
-        txn_id: txn.clone(),
-        write_keys: vec!["k".into()],
-    }).unwrap();
+    // PR #3: ValidateOk variant removed. Use Committed directly to mark
+    // a crash window between Committing and the WAL terminal.
     store.append_wal(&WalRecord::Committing {
         txn_id: txn.clone(),
         upload_keys: vec!["k".into()],

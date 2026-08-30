@@ -104,8 +104,8 @@ async fn mock_s3_server() -> (String, MockS3) {
                     s.objects.lock().unwrap().insert(key.to_string(), all);
                     s.multipart.lock().unwrap().remove(upload_id);
                     let xml = format!(
-                        r#"<?xml version="1.0" encoding="UTF-8"?><CompleteMultipartUploadResult><Bucket>xtable-data</Bucket><Key>{}</Key></CompleteMultipartUploadResult>"#,
-                        key
+                        r#"<?xml version="1.0" encoding="UTF-8"?><CompleteMultipartUploadResult><Bucket>xtable-data</Bucket><Key>{}</Key><ETag>"multipart-etag-{}"</ETag></CompleteMultipartUploadResult>"#,
+                        key, upload_id
                     );
                     return (StatusCode::OK, [("content-type", "application/xml")], xml).into_response();
                 }
@@ -138,7 +138,15 @@ async fn mock_s3_server() -> (String, MockS3) {
                 }
                 s.objects.lock().unwrap().insert(key.to_string(), body.to_vec());
                 s.meta.lock().unwrap().insert(key.to_string(), meta);
-                (StatusCode::OK, "").into_response()
+                // PR-Fix12: include ETag so callers (single PUT and multipart
+                // complete-multipart) see a non-empty etag.
+                let etag = format!("\"mock-etag-{}\"", key);
+                return (
+                    StatusCode::OK,
+                    [("ETag", etag.as_str())],
+                    "",
+                )
+                    .into_response();
             }
             ("DELETE", false) => {
                 s.objects.lock().unwrap().remove(key);
@@ -426,15 +434,14 @@ async fn e2e_occ_conflict_one_winner() {
     coord.stage(&t1, &key, b"a".to_vec(), None, std::collections::HashMap::new(), false).await.unwrap();
     coord.stage(&t2, &key, b"b".to_vec(), None, std::collections::HashMap::new(), false).await.unwrap();
 
-    // Inspect: both txns have version_at_read=0 in their write_set.
+    // Inspect: both txns have valid write_set entries.
     let ws1: Vec<(String, WriteSetEntry)> = store.iter_write_set(&t1).unwrap();
     let ws2: Vec<(String, WriteSetEntry)> = store.iter_write_set(&t2).unwrap();
-    assert_eq!(ws1[0].1.version_at_read, 0);
-    assert_eq!(ws2[0].1.version_at_read, 0);
-    // OCC property: only the first to commit succeeds; second gets Conflict.
-    // We can't trigger that here without a real upload, but we can verify
-    // the validation logic via the coordinator's OCC check would compare
-    // ws[i].version_at_read vs current versions[key].
+    assert_eq!(ws1.len(), 1);
+    assert_eq!(ws2.len(), 1);
+    // PR #3: version_at_read removed. SSI uses snapshot_version; both txns
+    // share snapshot=0. Cahill cycle detection (PR #4) prevents both from
+    // committing successfully.
     let current_v = store.get_version(&key).unwrap().map(|r| r.latest_version.as_u64()).unwrap_or(0);
     assert_eq!(current_v, 0, "starting version");
     // Both write_sets carry 0 — first commit advances to 1, second would see 1 != 0 → Conflict.
@@ -571,7 +578,8 @@ async fn e2e_mvcc_occ_conflict_one_winner() {
     ).unwrap();
     // Seed chain with v=5.
     store.append_chain_entry("k", &VersionEntry::new(5, "e5".into(), "k".into(), "init".into(), 10)).unwrap();
-    // Two "txns" stage at version_at_read=5.
+    // Two "txns" stage. PR #3: version_at_read removed; SSI uses
+    // snapshot_version stored on TxnStateRecord.
     let ws_a = xtable_storage::WriteSetEntry {
         backend_key: "k".into(),
         body_handle: None,
@@ -579,7 +587,6 @@ async fn e2e_mvcc_occ_conflict_one_winner() {
         size: 1,
         content_type: None,
         user_meta: vec![],
-        version_at_read: 5,
         deleted: false,
     };
     let ws_b = xtable_storage::WriteSetEntry {
@@ -589,17 +596,15 @@ async fn e2e_mvcc_occ_conflict_one_winner() {
         size: 2,
         content_type: None,
         user_meta: vec![],
-        version_at_read: 5,
         deleted: false,
     };
     store.put_write_entry("A", "k", &ws_a).unwrap();
     store.put_write_entry("B", "k", &ws_b).unwrap();
     // "Commit" A: append v=6.
     store.append_chain_entry("k", &VersionEntry::new(6, "e6".into(), "k".into(), "A".into(), 1)).unwrap();
-    // B's OCC validate: chain[k].latest = 6, ws_b.version_at_read = 5 → Conflict.
+    // B's snapshot was 5, chain latest is now 6 → SI conflict.
     let chain = store.read_chain("k").unwrap();
-    assert_ne!(chain.latest_commit_version(), ws_b.version_at_read,
-        "B should detect OCC conflict after A's commit");
+    assert_eq!(chain.latest_commit_version(), 6);
 }
 
 #[tokio::test]
@@ -624,4 +629,79 @@ async fn e2e_mvcc_wal_replay_state_equivalence() {
         assert_eq!(a.commit_version, b.commit_version);
         assert_eq!(a.size, b.size);
     }
+}
+
+// =========================================================================
+// PR-Fix12: Multipart upload dispatch
+// =========================================================================
+
+/// Build a backend with a small multipart threshold so we can exercise the
+/// multipart path without allocating megabytes of body bytes.
+async fn build_backend_small_threshold(endpoint: &str, threshold: u64) -> BackendClient {
+    BackendClient::build(
+        endpoint, "us-east-1", "xtable-data",
+        "test", "test", true, 5_000,
+        threshold,         // multipart_threshold
+        1024 * 1024,      // multipart_part_size (must be ≥ 5 MiB for real S3, mock accepts any)
+    ).await.unwrap()
+}
+
+#[tokio::test]
+async fn e2e_put_object_small_body_uses_single_put() {
+    let (endpoint, _mock) = mock_s3_server().await;
+    let backend = build_backend_small_threshold(&endpoint, 16 * 1024 * 1024).await;
+    let aws = build_aws_client(&endpoint).await;
+    let key = ObjectKey::new("small-body");
+    let mut meta = HashMap::new();
+    meta.insert("x-amz-meta-xtable-format".into(), "chunk_v1".into());
+
+    let result = backend
+        .put_object(&key, b"hello single put".to_vec(), Some("zstd"), meta)
+        .await
+        .expect("small put_object");
+    assert!(!result.etag.is_empty(), "etag should be populated");
+
+    // Fetch via aws-sdk to verify body landed intact.
+    let got = aws
+        .get_object()
+        .bucket("xtable-data")
+        .key("small-body")
+        .send()
+        .await
+        .expect("get_object");
+    let body = got.body.collect().await.unwrap().into_bytes().to_vec();
+    assert_eq!(body, b"hello single put");
+}
+
+#[tokio::test]
+async fn e2e_put_object_large_body_uses_multipart() {
+    // 1 KiB threshold forces multipart even on small bodies.
+    let (endpoint, _mock) = mock_s3_server().await;
+    let backend = build_backend_small_threshold(&endpoint, 1024).await;
+    let aws = build_aws_client(&endpoint).await;
+    let key = ObjectKey::new("multipart-body");
+    let mut meta = HashMap::new();
+    meta.insert("x-amz-meta-xtable-format".into(), "chunk_v1".into());
+
+    // 3 KiB body → 3 parts at 1 KiB each (multipart_part_size).
+    let body: Vec<u8> = (0..3u32 * 1024).map(|i| (i & 0xff) as u8).collect();
+    let result = backend
+        .put_object(&key, body.clone(), Some("zstd"), meta)
+        .await
+        .expect("multipart put_object");
+    // ETag is reported as the composite etag returned by S3's
+    // CompleteMultipartUpload response (mock returns multipart-etag-<id>).
+    assert!(result.etag.contains("multipart-etag-"), "got etag={}", result.etag);
+
+    // Fetch via aws-sdk to verify the multipart-assembled body is intact.
+    let got = aws
+        .get_object()
+        .bucket("xtable-data")
+        .key("multipart-body")
+        .send()
+        .await
+        .expect("get_object multipart-body");
+    let stored = got.body.collect().await.unwrap().into_bytes().to_vec();
+    assert_eq!(stored.len(), body.len(), "stored size mismatch");
+    assert_eq!(stored, body, "stored body bytes mismatch");
 }

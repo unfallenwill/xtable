@@ -40,6 +40,51 @@ use crate::validation::{validate, JsonSchema, ValidationError};
 pub struct StructuredTxn {
     pub txn_id: String,
     pub snapshot_version: u64,
+    /// PR-Fix8.1: weak back-reference to the StructuredSpace that minted
+    /// this txn. Used by `record_read` to call `coordinator.read()` so
+    /// SSI ReadSet capture works. Weak so a `StructuredTxn` does not
+    /// leak the engine.
+    pub(crate) space: std::sync::Weak<StructuredSpace>,
+}
+
+impl StructuredTxn {
+    /// A no-op txn used by admin / test code paths that don't have a
+    /// real SI transaction. The snapshot_version is `u64::MAX` so that
+    /// read_at_snapshot logic falls through to "latest".
+    pub fn admin() -> Self {
+        Self {
+            txn_id: "_admin".to_string(),
+            snapshot_version: u64::MAX,
+            space: std::sync::Weak::new(),
+        }
+    }
+
+    /// Record that this txn read `key` at `observed_version`. Forwards
+    /// to the coordinator's `read` so the SI lock manager sees it.
+    /// PR-Fix8.1.
+    ///
+    /// Synchronous because the underlying coordinator call only touches
+    /// in-process state (parking_lot Mutex). The coordinator's `read`
+    /// is async for trait uniformity; we block_on it here so the read
+    /// functions (which are themselves sync) can call this directly.
+    pub fn record_read(&self, key: xtable_core::ObjectKey, observed_version: u64) {
+        if self.space.strong_count() == 0 {
+            return;
+        }
+        if self.txn_id == "_admin" {
+            return;
+        }
+        let space = match self.space.upgrade() {
+            Some(s) => s,
+            None => return,
+        };
+        let _ = futures::executor::block_on(space.txn.read(
+            &self.txn_id,
+            &key,
+            xtable_core::Version(observed_version),
+            String::new(),
+        ));
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -176,10 +221,14 @@ impl StructuredSpace {
 
     // ---- Transaction lifecycle ----
 
-    pub async fn begin_txn(&self) -> XtableResult<StructuredTxn> {
+    pub async fn begin_txn(self: &Arc<Self>) -> XtableResult<StructuredTxn> {
         let txn_id = self.txn.begin(None).await?;
         let snapshot_version = self.store.current_global_version()?;
-        Ok(StructuredTxn { txn_id, snapshot_version })
+        Ok(StructuredTxn {
+            txn_id,
+            snapshot_version,
+            space: Arc::downgrade(self),
+        })
     }
 
     pub async fn heartbeat(&self, t: &StructuredTxn) -> XtableResult<()> {
@@ -295,12 +344,13 @@ impl StructuredSpace {
 
     pub async fn get_schema(
         &self,
+        txn: &StructuredTxn,
         space: &str,
         name: &str,
         version: Option<u32>,
         snapshot: Option<u64>,
     ) -> XtableResult<Option<SchemaInfo>> {
-        let _snap = snapshot.unwrap_or_else(|| self.store.current_global_version().unwrap_or(0));
+        let _snap = snapshot.unwrap_or(txn.snapshot_version);
         let idx = match self.store.get_schema_index(space, name)? {
             Some(i) => i,
             None => return Ok(None),
@@ -325,7 +375,11 @@ impl StructuredSpace {
         }))
     }
 
-    pub async fn list_schemas(&self, space: &str) -> XtableResult<Vec<SchemaInfo>> {
+    pub async fn list_schemas(
+        &self,
+        _txn: &StructuredTxn,
+        space: &str,
+    ) -> XtableResult<Vec<SchemaInfo>> {
         let mut out = Vec::new();
         for (name, _idx) in self.store.iter_schema_index(space)? {
             let v = self
@@ -496,15 +550,19 @@ impl StructuredSpace {
 
     pub fn get_record(
         &self,
+        txn: &StructuredTxn,
         space: &str,
         table: &str,
         record_id: &str,
         snapshot: Option<u64>,
     ) -> XtableResult<Option<Record>> {
-        let snap = snapshot.unwrap_or_else(|| self.store.current_global_version().unwrap_or(0));
+        let snap = snapshot.unwrap_or(txn.snapshot_version);
         match self.store.get_record_index_with_body(space, table, record_id)? {
             None => Ok(None),
             Some((idx, body)) => {
+                // PR-Fix8.3: capture ReadSet for SSI cycle detection.
+                let key_str = record_key(space, table, record_id)?;
+                txn.record_read(ObjectKey::new(&key_str), idx.commit_version);
                 if idx.commit_version > snap {
                     // record was modified after the requested snapshot —
                     // for v1 (single-entry index) we surface it as "not
@@ -529,17 +587,21 @@ impl StructuredSpace {
 
     pub fn query_records(
         &self,
+        txn: &StructuredTxn,
         space: &str,
         table: &str,
         query: Query,
         snapshot: Option<u64>,
     ) -> XtableResult<QueryResult> {
-        let snap = snapshot.unwrap_or_else(|| self.store.current_global_version().unwrap_or(0));
+        let snap = snapshot.unwrap_or(txn.snapshot_version);
         let mut records: Vec<Record> = Vec::new();
         for (rid, idx, body) in self.store_iter_with_body(space, table)? {
             if idx.commit_version > snap {
                 continue;
             }
+            // PR-Fix8.3: capture ReadSet per visible record.
+            let key_str = record_key(space, table, &rid)?;
+            txn.record_read(ObjectKey::new(&key_str), idx.commit_version);
             if idx.deleted {
                 if query.include_deleted {
                     records.push(Record {
@@ -578,6 +640,7 @@ impl StructuredSpace {
     /// S1 and S2, as `(record_id, body@S1, body@S2)`.
     pub fn diff(
         &self,
+        _txn: &StructuredTxn,
         space: &str,
         table: &str,
         s1: u64,
@@ -586,7 +649,7 @@ impl StructuredSpace {
         use std::collections::BTreeMap;
         let mut by_id: BTreeMap<String, (Option<Value>, Option<Value>)> = BTreeMap::new();
         for snap in [s1, s2] {
-            let res = self.query_records(space, table, Query::new().include_deleted(true), Some(snap))?;
+            let res = self.query_records(&StructuredTxn::admin(), space, table, Query::new().include_deleted(true), Some(snap))?;
             for r in res.records {
                 let entry = by_id.entry(r.record_id.clone()).or_insert((None, None));
                 let pos = if snap == s1 { 0 } else { 1 };
@@ -840,7 +903,7 @@ mod tests {
         })
     }
 
-    async fn setup() -> (StructuredSpace, TempDir) {
+    async fn setup() -> (std::sync::Arc<StructuredSpace>, TempDir) {
         let tmp = TempDir::new().unwrap();
         let store = LocalStore::open_path(&tmp.path().join("xt.redb")).unwrap();
         let backend = Arc::new(BackendClient::dummy_for_test_async().await.unwrap());
@@ -850,7 +913,7 @@ mod tests {
             tmp.path().join("staged"),
             4,
         ));
-        let space = StructuredSpace::new(coord, store, backend);
+        let space = std::sync::Arc::new(StructuredSpace::new(coord, store, backend));
         (space, tmp)
     }
 
@@ -862,7 +925,7 @@ mod tests {
         assert_eq!(v1, 1);
         sp.commit_txn(&txn).await.unwrap();
 
-        let info = sp.get_schema("acme", "task", None, None).await.unwrap().unwrap();
+        let info = sp.get_schema(&StructuredTxn::admin(), "acme", "task", None, None).await.unwrap().unwrap();
         assert_eq!(info.version, 1);
     }
 
@@ -874,7 +937,7 @@ mod tests {
             sp.register_schema(&txn, "acme", "task", schema_obj()).await.unwrap();
             sp.commit_txn(&txn).await.unwrap();
         }
-        let info = sp.get_schema("acme", "task", None, None).await.unwrap().unwrap();
+        let info = sp.get_schema(&StructuredTxn::admin(), "acme", "task", None, None).await.unwrap().unwrap();
         assert_eq!(info.version, 3);
     }
 
@@ -899,11 +962,11 @@ mod tests {
         .unwrap();
         sp.commit_txn(&txn).await.unwrap();
 
-        let r = sp.get_record("acme", "tasks", "a", None).unwrap().unwrap();
+        let r = sp.get_record(&StructuredTxn::admin(), "acme", "tasks", "a", None).unwrap().unwrap();
         assert_eq!(r.body["title"], "alpha");
 
         let q = Query::new().order("title", OrderDir::Asc);
-        let res = sp.query_records("acme", "tasks", q, None).unwrap();
+        let res = sp.query_records(&StructuredTxn::admin(), "acme", "tasks", q, None).unwrap();
         assert_eq!(res.records.len(), 1);
     }
 
@@ -952,7 +1015,7 @@ mod tests {
         sp.delete_record(&t2, "acme", "tasks", "x").await.unwrap();
         sp.commit_txn(&t2).await.unwrap();
 
-        assert!(sp.get_record("acme", "tasks", "x", None).unwrap().is_none());
+        assert!(sp.get_record(&StructuredTxn::admin(), "acme", "tasks", "x", None).unwrap().is_none());
     }
 
     #[tokio::test]
@@ -972,7 +1035,7 @@ mod tests {
         .await
         .unwrap();
         sp.abort_txn(&t).await.unwrap();
-        assert!(sp.get_record("acme", "tasks", "nope", None).unwrap().is_none());
+        assert!(sp.get_record(&StructuredTxn::admin(), "acme", "tasks", "nope", None).unwrap().is_none());
     }
 
     #[tokio::test]
@@ -997,7 +1060,7 @@ mod tests {
         let q = Query::new()
             .filter(Filter::Ge { field: "n".into(), value: json!(98) })
             .order("n", OrderDir::Asc);
-        let res = sp.query_records("acme", "tasks", q, None).unwrap();
+        let res = sp.query_records(&StructuredTxn::admin(), "acme", "tasks", q, None).unwrap();
         let ids: Vec<_> = res.records.iter().map(|r| r.record_id.clone()).collect();
         // 'a' is 97, 'b' is 98, 'c' is 99 — filter n>=98 returns b,c sorted ascending by n.
         assert_eq!(ids, vec!["b".to_string(), "c".to_string()]);
@@ -1034,7 +1097,7 @@ mod tests {
         .await
         .unwrap();
         let s2 = sp.commit_txn(&t2).await.unwrap();
-        let diff = sp.diff("s", "t", s1, s2).unwrap();
+        let diff = sp.diff(&StructuredTxn::admin(), "s", "t", s1, s2).unwrap();
         assert_eq!(diff.len(), 1);
         assert_eq!(diff[0].0, "r");
     }
@@ -1047,7 +1110,7 @@ mod tests {
             sp.register_schema(&t, "s", n, json!({"type":"object"})).await.unwrap();
             sp.commit_txn(&t).await.unwrap();
         }
-        let list = sp.list_schemas("s").await.unwrap();
+        let list = sp.list_schemas(&StructuredTxn::admin(), "s").await.unwrap();
         let names: Vec<_> = list.iter().map(|s| s.name.clone()).collect();
         assert_eq!(names, vec!["alpha", "bravo", "charlie"]);
     }
@@ -1066,8 +1129,8 @@ mod tests {
             .unwrap();
         sp.commit_txn(&t2).await.unwrap();
 
-        let v1 = sp.get_schema("s", "n", Some(1), None).await.unwrap().unwrap();
-        let v2 = sp.get_schema("s", "n", None, None).await.unwrap().unwrap();
+        let v1 = sp.get_schema(&StructuredTxn::admin(), "s", "n", Some(1), None).await.unwrap().unwrap();
+        let v2 = sp.get_schema(&StructuredTxn::admin(), "s", "n", None, None).await.unwrap().unwrap();
         assert_eq!(v1.version, 1);
         assert_eq!(v2.version, 2);
         assert_eq!(v1.body["minimum"], 1);
@@ -1092,7 +1155,7 @@ mod tests {
         .unwrap();
         let _ = sp.commit_txn(&t).await.unwrap();
         // Default snap is current_global_version — record exists.
-        assert!(sp.get_record("s", "t", "r", None).unwrap().is_some());
+        assert!(sp.get_record(&StructuredTxn::admin(), "s", "t", "r", None).unwrap().is_some());
     }
 
     #[tokio::test]
@@ -1199,7 +1262,7 @@ mod tests {
     #[tokio::test]
     async fn empty_table_query_returns_no_records() {
         let (sp, _t) = setup().await;
-        let res = sp.query_records("s", "t", Query::new(), None).unwrap();
+        let res = sp.query_records(&StructuredTxn::admin(), "s", "t", Query::new(), None).unwrap();
         assert!(res.records.is_empty());
         assert_eq!(res.total_matched, 0);
     }

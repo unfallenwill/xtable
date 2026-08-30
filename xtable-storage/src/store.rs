@@ -17,13 +17,15 @@ use std::sync::Arc;
 use redb::{Database, ReadableTable};
 
 use crate::cf::{
-    meta_key, TBL_ACTIVE_SNAPSHOTS, TBL_META, TBL_MULTIPART, TBL_READ_SET, TBL_RECORD_INDEX,
-    TBL_SCHEMA_INDEX, TBL_STAGED_BLOBS, TBL_TXN_STATE, TBL_VERSION_CHAINS, TBL_VERSIONS,
-    TBL_WAL, TBL_WRITE_SET,
+    meta_key, ChunkStatus, TBL_ACTIVE_SNAPSHOTS, TBL_CHUNK_INDEX, TBL_META, TBL_MULTIPART,
+    TBL_RECORD_INDEX, TBL_SCHEMA_INDEX, TBL_SI_EDGES, TBL_SI_IN_EDGES_BY_TJ, TBL_SI_READ,
+    TBL_SI_RECENT, TBL_SI_WRITE, TBL_STAGED_BLOBS, TBL_TXN_STATE, TBL_VERSION_CHAINS,
+    TBL_VERSIONS, TBL_WAL, TBL_WRITE_SET,
 };
+use crate::chunk::ChunkIndexEntry;
 use crate::txn_state::{
-    BlobRecord, MultipartState, ReadSetEntry, RecordIndexEntry, SchemaIndexEntry, StoredRecord,
-    TxnStateRecord, WriteSetEntry,
+    BlobRecord, MultipartState, RecordIndexEntry, SchemaIndexEntry, StoredRecord, TxnStateRecord,
+    WriteSetEntry,
 };
 use crate::version_chain::{VersionChain, VersionEntry};
 use crate::version_index::VersionRecord;
@@ -31,7 +33,7 @@ use crate::wal::WalRecord;
 use xtable_core::headers::TxnStatus;
 use xtable_core::{ObjectKey, XtableError, XtableResult};
 
-fn redb_err<E: std::fmt::Display>(e: E) -> XtableError {
+pub(crate) fn redb_err<E: std::fmt::Display>(e: E) -> XtableError {
     XtableError::Storage(e.to_string())
 }
 
@@ -71,7 +73,6 @@ impl LocalStore {
                 let _ = txn.open_table(TBL_META).map_err(redb_err)?;
                 let _ = txn.open_table(TBL_WAL).map_err(redb_err)?;
                 let _ = txn.open_table(TBL_TXN_STATE).map_err(redb_err)?;
-                let _ = txn.open_table(TBL_READ_SET).map_err(redb_err)?;
                 let _ = txn.open_table(TBL_WRITE_SET).map_err(redb_err)?;
                 let _ = txn.open_table(TBL_STAGED_BLOBS).map_err(redb_err)?;
                 let _ = txn.open_table(TBL_MULTIPART).map_err(redb_err)?;
@@ -79,6 +80,12 @@ impl LocalStore {
                 let _ = txn.open_table(TBL_ACTIVE_SNAPSHOTS).map_err(redb_err)?;
                 let _ = txn.open_table(TBL_RECORD_INDEX).map_err(redb_err)?;
                 let _ = txn.open_table(TBL_SCHEMA_INDEX).map_err(redb_err)?;
+                let _ = txn.open_table(TBL_CHUNK_INDEX).map_err(redb_err)?;
+                let _ = txn.open_table(TBL_SI_READ).map_err(redb_err)?;
+                let _ = txn.open_table(TBL_SI_WRITE).map_err(redb_err)?;
+                let _ = txn.open_table(TBL_SI_IN_EDGES_BY_TJ).map_err(redb_err)?;
+                let _ = txn.open_table(TBL_SI_RECENT).map_err(redb_err)?;
+                let _ = txn.open_table(TBL_SI_EDGES).map_err(redb_err)?;
                 let mut meta = txn.open_table(TBL_META).map_err(redb_err)?;
                 if meta.get(meta_key::GLOBAL_VERSION).map_err(redb_err)?.is_none() {
                     meta.insert(meta_key::GLOBAL_VERSION, 0u64).map_err(redb_err)?;
@@ -255,16 +262,7 @@ impl LocalStore {
         })
     }
 
-    // ----- read_set / write_set (Phase 2) -----
-
-    pub fn put_read_entry(&self, txn_id: &str, key: &str, entry: &ReadSetEntry) -> XtableResult<()> {
-        let bytes = bincode::serialize(entry).map_err(XtableError::from)?;
-        self.with_write(|txn| {
-            let mut tbl = txn.open_table(TBL_READ_SET).map_err(redb_err)?;
-            tbl.insert((txn_id, key), bytes.as_slice()).map_err(redb_err)?;
-            Ok(())
-        })
-    }
+    // ----- write_set (Phase 2 / MVCC) -----
 
     pub fn put_write_entry(&self, txn_id: &str, key: &str, entry: &WriteSetEntry) -> XtableResult<()> {
         let bytes = bincode::serialize(entry).map_err(XtableError::from)?;
@@ -456,16 +454,40 @@ impl LocalStore {
 
     /// Bulk-append multiple entries in a single redb write txn. Used by
     /// CommitTxn for atomicity (I6).
-    pub fn append_chain_entries_bulk(&self, entries: &[(String, VersionEntry)]) -> XtableResult<()> {
+    ///
+    /// PR-Fix9.1: each entry carries the txn's `snapshot_version`.
+    /// Inside the atomic redb write txn, we check that
+    /// `chain[K].latest_commit_version <= snapshot_version` BEFORE
+    /// applying the append. If any key has been written by a concurrent
+    /// txn after our snapshot, the entire bulk append is rolled back
+    /// (via redb's transaction semantics) and we return
+    /// `XtableError::Conflict(key)`. This catches lost-update: two txns
+    /// at the same snapshot writing the same key cannot both succeed.
+    pub fn append_chain_entries_bulk(
+        &self,
+        entries: &[(String, VersionEntry, u64)], // (key, entry, snapshot_version)
+    ) -> XtableResult<()> {
         if entries.is_empty() {
             return Ok(());
         }
         let mut sorted = entries.to_vec();
         sorted.sort_by(|a, b| a.0.cmp(&b.0));
         let mut prepared: Vec<(String, Vec<u8>)> = Vec::with_capacity(sorted.len());
-        for (key, entry) in &sorted {
+        for (key, entry, snapshot_version) in &sorted {
             let mut chain = self.read_chain(key)?;
             let latest = chain.latest_commit_version();
+            // PR-Fix9.1: snapshot conflict check. If the chain already
+            // has an entry past our snapshot, a concurrent txn wrote
+            // after our snapshot — we must NOT overwrite (lost-update).
+            // Rolling back via redb aborts the entire bulk append so
+            // partial state is never published.
+            if !chain.entries.is_empty() && latest > *snapshot_version {
+                return Err(XtableError::Conflict(format!(
+                    "{}: snapshot {} < chain latest {}",
+                    key, snapshot_version, latest
+                )));
+            }
+            // Monotonicity check (kept for defense-in-depth).
             if entry.commit_version <= latest && !chain.entries.is_empty() {
                 return Err(XtableError::internal(format!(
                     "chain append not monotonic for key {}: latest={} new={}", key, latest, entry.commit_version
@@ -765,6 +787,88 @@ impl LocalStore {
         out.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(out)
     }
+
+    // ===== Chunk index (Phase 4 / PR #1) =====
+
+    pub fn put_chunk_index(&self, chunk_id: &str, entry: &ChunkIndexEntry) -> XtableResult<()> {
+        let bytes = bincode::serialize(entry).map_err(XtableError::from)?;
+        self.with_write(|txn| {
+            let mut tbl = txn.open_table(TBL_CHUNK_INDEX).map_err(redb_err)?;
+            tbl.insert(chunk_id, bytes.as_slice()).map_err(redb_err)?;
+            Ok(())
+        })
+    }
+
+    pub fn get_chunk_index(&self, chunk_id: &str) -> XtableResult<Option<ChunkIndexEntry>> {
+        self.with_read(|txn| {
+            let tbl = txn.open_table(TBL_CHUNK_INDEX).map_err(redb_err)?;
+            match tbl.get(chunk_id).map_err(redb_err)? {
+                Some(v) => {
+                    let rec: ChunkIndexEntry =
+                        bincode::deserialize(v.value()).map_err(XtableError::from)?;
+                    Ok(Some(rec))
+                }
+                None => Ok(None),
+            }
+        })
+    }
+
+    pub fn delete_chunk_index(&self, chunk_id: &str) -> XtableResult<()> {
+        self.with_write(|txn| {
+            let mut tbl = txn.open_table(TBL_CHUNK_INDEX).map_err(redb_err)?;
+            tbl.remove(chunk_id).map_err(redb_err)?;
+            Ok(())
+        })
+    }
+
+    /// Iterate all chunk index entries (used by GC and admin).
+    pub fn iter_all_chunk_index(&self) -> XtableResult<Vec<(String, ChunkIndexEntry)>> {
+        let mut out = Vec::new();
+        self.with_read(|txn| {
+            let tbl = txn.open_table(TBL_CHUNK_INDEX).map_err(redb_err)?;
+            for entry in tbl.iter().map_err(redb_err)? {
+                let (k, v) = entry.map_err(redb_err)?;
+                let rec: ChunkIndexEntry =
+                    bincode::deserialize(v.value()).map_err(XtableError::from)?;
+                out.push((k.value().to_string(), rec));
+            }
+            Ok(())
+        })?;
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
+    /// Mark chunks as `Deleted` so the GC sweep can issue
+    /// `DeleteObjects` and remove the rows.
+    pub fn mark_chunks_deleted(&self, chunk_ids: &[String]) -> XtableResult<()> {
+        if chunk_ids.is_empty() {
+            return Ok(());
+        }
+        let mut updated: Vec<(String, Vec<u8>)> = Vec::with_capacity(chunk_ids.len());
+        self.with_read(|txn| {
+            let tbl = txn.open_table(TBL_CHUNK_INDEX).map_err(redb_err)?;
+            for id in chunk_ids {
+                if let Some(v) = tbl.get(id.as_str()).map_err(redb_err)? {
+                    let mut rec: ChunkIndexEntry =
+                        bincode::deserialize(v.value()).map_err(XtableError::from)?;
+                    rec.status = ChunkStatus::Deleted;
+                    let bytes = bincode::serialize(&rec).map_err(XtableError::from)?;
+                    updated.push((id.clone(), bytes));
+                }
+            }
+            Ok(())
+        })?;
+        if !updated.is_empty() {
+            self.with_write(|txn| {
+                let mut tbl = txn.open_table(TBL_CHUNK_INDEX).map_err(redb_err)?;
+                for (id, bytes) in &updated {
+                    tbl.insert(id.as_str(), bytes.as_slice()).map_err(redb_err)?;
+                }
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -830,7 +934,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let store = LocalStore::open_path(&tmp.path().join("xt.redb")).unwrap();
         let r1 = WalRecord::Begin { txn_id: "T1".into(), snapshot_version: 0, idempotency_key: None };
-        let r2 = WalRecord::Committed { txn_id: "T1".into(), commit_version: 1 };
+        let r2 = WalRecord::Commit { txn_id: "T1".into(), commit_version: 1, write_keys: vec![] };
         store.append_wal(&r1).unwrap();
         store.append_wal(&r2).unwrap();
         let log = store.iter_wal().unwrap();
@@ -884,7 +988,6 @@ mod tests {
             size: 1,
             content_type: None,
             user_meta: vec![],
-            version_at_read: 0,
             deleted: false,
         };
         let e2 = WriteSetEntry {
@@ -894,7 +997,6 @@ mod tests {
             size: 2,
             content_type: None,
             user_meta: vec![],
-            version_at_read: 0,
             deleted: false,
         };
         store.put_write_entry("T1", "k1", &e1).unwrap();

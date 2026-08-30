@@ -1,4 +1,4 @@
-//! Property-based tests for OCC invariants.
+//! Property-based tests for txn-coordinator invariants (MVCC + SSI).
 //!
 //! These tests don't need a real S3 backend — they exercise the coordinator
 //! against a mock-style environment (in-memory HashMap simulated via direct
@@ -79,34 +79,15 @@ async fn inv_commit_no_writes_is_idempotent() {
 }
 
 // =========================================================================
-// INVARIANT 2: OCC conflict detection
+// INVARIANT 2 (removed): OCC conflict detection
 // =========================================================================
+//
+// The OCC-specific `version_at_read` invariant is gone in the MVCC+SSI era.
+// The corresponding property is now covered by:
+//   - `ssi_write_write_one_winner` in `tests/ssi_invariants.rs`
+//     (snapshot-conflict check in `append_chain_entries_bulk`)
+//   - `ssi_write_skew_aborts_one` (Cahill cycle detection)
 
-#[tokio::test]
-async fn inv_occ_records_correct_version_at_read() {
-    let (coord, store, _tmp) = build_for_test().await;
-    let k = ObjectKey::new("shared");
-    // Seed chain with v=5 AND bump global_version to 5 (V16 fix: snapshot_version
-    // is taken at begin, not from chain.latest at stage time).
-    store.append_chain_entry("shared", &xtable_storage::VersionEntry::new(5, "e5".into(), "shared".into(), "T_seed".into(), 0)).unwrap();
-    for _ in 0..5 {
-        let _ = store.next_global_version().unwrap();
-    }
-
-    // Two txns both begin at snapshot=5 and stage.
-    let t1 = coord.begin(None).await.unwrap();
-    let t2 = coord.begin(None).await.unwrap();
-    coord.stage(&t1, &k, b"a".to_vec(), None, HashMap::new(), false).await.unwrap();
-    coord.stage(&t2, &k, b"b".to_vec(), None, HashMap::new(), false).await.unwrap();
-
-    // Both should have version_at_read == 5 in their write_set entries.
-    let ws1 = store.iter_write_set(&t1).unwrap();
-    let ws2 = store.iter_write_set(&t2).unwrap();
-    assert_eq!(ws1[0].1.version_at_read, 5);
-    assert_eq!(ws2[0].1.version_at_read, 5);
-    // Both have the same starting version_at_read; if both try to commit,
-    // OCC detects chain[k].latest > 5 for the second one and returns 409.
-}
 
 // =========================================================================
 // INVARIANT 3: Version monotonicity

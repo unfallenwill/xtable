@@ -105,7 +105,13 @@ pub async fn rebuild(
         store.put_versions_bulk(&updates)?;
     }
     if !chain_entries.is_empty() {
-        store.append_chain_entries_bulk(&chain_entries)?;
+        // Cold rebuild: use u64::MAX as snapshot so we never conflict
+        // with prior state — the rebuilt chains reflect the S3 ground truth.
+        let with_snapshot: Vec<(String, VersionEntry, u64)> = chain_entries
+            .into_iter()
+            .map(|(k, e)| (k, e, u64::MAX))
+            .collect();
+        store.append_chain_entries_bulk(&with_snapshot)?;
     }
 
     // Set global_version counter so future commits allocate > max_v.

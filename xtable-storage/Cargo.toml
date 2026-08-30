@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 xtable-core = { path = "../xtable-core" }
+xtable-backend = { path = "../xtable-backend" }
 
 redb = { workspace = true }
 serde = { workspace = true }
@@ -19,6 +20,14 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 ulid = { workspace = true }
 chrono = { workspace = true }
+
+# MemTable + chunk flush dependencies
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+bytes = { workspace = true }
+xxhash-rust = { workspace = true }
+zstd = { workspace = true }
+crc32fast = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

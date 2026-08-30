@@ -79,7 +79,7 @@ pub async fn handler(
                     if let Some(state) = mp.get_mut(upload_id) {
                         state.parts.push((pn, body.to_vec()));
                         let etag = format!("\"etag-{}\"", pn);
-                        return (StatusCode::OK, [("etag", etag)]).into_response();
+                        return (StatusCode::OK, [("ETag", etag)]).into_response();
                     }
                 }
             }
@@ -111,6 +111,7 @@ pub async fn handler(
 
     // PutObject
     if method == Method::PUT {
+        eprintln!("DEBUG mock PUT key={} body_len={}", key, body.len());
         let mut meta = HashMap::new();
         for (k, v) in headers.iter() {
             let name = k.as_str().to_ascii_lowercase();
@@ -119,8 +120,18 @@ pub async fn handler(
             }
         }
         s.objects.lock().unwrap().insert(key.clone(), body.to_vec());
-        s.meta.lock().unwrap().insert(key, meta);
-        return (StatusCode::OK, "").into_response();
+        s.meta.lock().unwrap().insert(key.clone(), meta);
+        // PR-Fix12: return a stable ETag header so callers (incl. multipart
+        // complete-multipart) can verify upload identity. AWS-SDK requires the
+        // canonical capitalisation.
+        let etag = format!("\"mock-etag-{}\"", key);
+        eprintln!("DEBUG mock PUT returning etag={}", etag);
+        return (
+            StatusCode::OK,
+            [("ETag", etag.as_str())],
+            "",
+        )
+            .into_response();
     }
 
     // GetObject

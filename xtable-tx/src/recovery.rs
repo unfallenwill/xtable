@@ -39,16 +39,17 @@ pub async fn recover(store: &LocalStore, backend: &xtable_backend::BackendClient
     let mut last_uploaded: HashMap<String, Vec<String>> = HashMap::new();
 
     for (_seq, rec) in &log {
-        let txn_id = rec.txn_id().to_string();
+        // All legacy per-txn variants carry a txn_id. The new global
+        // variants (CahillEdge/Commit/MemtableFlushed) carry either
+        // txn_id or chunk_id; the legacy recovery logic below only
+        // matches on per-txn variants so a None is unreachable here.
+        let txn_id = rec.txn_id().expect("per-txn variant without txn_id").to_string();
         match rec {
             WalRecord::Begin { .. } => {
                 last_status.entry(txn_id.clone()).or_insert(TxnStatus::Active);
             }
             WalRecord::Stage { .. } => {
                 last_status.entry(txn_id.clone()).or_insert(TxnStatus::Active);
-            }
-            WalRecord::ValidateOk { .. } => {
-                last_status.insert(txn_id.clone(), TxnStatus::Validating);
             }
             WalRecord::Committing { upload_keys, .. } => {
                 last_status.insert(txn_id.clone(), TxnStatus::Committing);
@@ -62,6 +63,22 @@ pub async fn recover(store: &LocalStore, backend: &xtable_backend::BackendClient
             }
             WalRecord::Aborted { .. } => {
                 last_status.insert(txn_id.clone(), TxnStatus::Aborted);
+            }
+            // PR-Fix2.5: `Commit` is terminal — the chain append + memtable
+            // publish happened atomically with this WAL record. Treating
+            // it as `Active` would call `abort_txn_no_uploads`, which only
+            // drops staged blobs and leaves the chain intact — leaving
+            // TxnState.status=Aborted inconsistent with a published chain.
+            WalRecord::Commit { .. } => {
+                last_status.insert(txn_id.clone(), TxnStatus::Committed);
+            }
+            // `CahillEdge` is non-terminal (audit-only); `MemtableFlushed`
+            // is global. Both pass through unchanged.
+            WalRecord::CahillEdge { .. } => {
+                last_status.entry(txn_id.clone()).or_insert(TxnStatus::Active);
+            }
+            WalRecord::MemtableFlushed { .. } => {
+                // Global; no per-txn status update.
             }
         }
     }
@@ -81,7 +98,7 @@ pub async fn recover(store: &LocalStore, backend: &xtable_backend::BackendClient
             }
             // Non-terminal. Decide based on chain state.
             match status {
-                TxnStatus::Active | TxnStatus::Validating => {
+                TxnStatus::Active => {
                     // No backend uploads happened. Safe abort.
                     abort_txn_no_uploads(store, &txn_id)?;
                 }
