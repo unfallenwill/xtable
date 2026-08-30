@@ -69,23 +69,37 @@ impl BackendClient {
         multipart_threshold_bytes: u64,
         multipart_part_size_bytes: u64,
     ) -> BackendResult<Self> {
-        let creds = Credentials::new(access_key_id, secret_access_key, None, None, "xtable-static");
+        // Match the canonical aws-sdk-s3 setup that works against volcengine
+        // TOS at `tos-s3-*.volces.com`. Two non-obvious things matter:
+        // (a) use `Client::new(&shared_config)` directly — building a
+        // custom S3 config via `Builder::from(&cfg)` and
+        // `Client::from_conf(...)` produces signatures TOS rejects;
+        // (b) use `defaults(BehaviorVersion::latest())` (NOT
+        // `aws_config::from_env()`) — `from_env()` reads AWS_REGION /
+        // AWS_PROFILE / AWS_CONFIG_FILE env vars and produces a config
+        // TOS rejects with `SignatureDoesNotMatch`.
+        let creds = Credentials::new(
+            access_key_id,
+            secret_access_key,
+            None,
+            None,
+            "xtable-static",
+        );
 
-        let loader = aws_config::defaults(BehaviorVersion::latest())
+        let shared_config = aws_config::defaults(BehaviorVersion::latest())
             .endpoint_url(endpoint)
             .region(aws_config::Region::new(region.to_string()))
-            .credentials_provider(creds);
+            .credentials_provider(creds)
+            .load()
+            .await;
 
-        // Note: per-request timeouts configured via `inner.client` builders below;
-        // the ConfigLoader API doesn't expose `request_timeout` directly in 1.5+.
+        let client = Client::new(&shared_config);
 
-        let cfg = loader.load().await;
-
-        let mut s3_builder = aws_sdk_s3::config::Builder::from(&cfg);
-        if force_path_style {
-            s3_builder = s3_builder.force_path_style(true);
-        }
-        let client = Client::from_conf(s3_builder.build());
+        // The `force_path_style` knob is preserved on the public signature
+        // because the TOS-native endpoint (`tos-*.volces.com`) is
+        // path-only; revisit when supporting that path. Volcengine TOS at
+        // `tos-s3-*.volces.com` is virtual-hosted-only.
+        let _ = force_path_style;
 
         Ok(Self {
             inner: Arc::new(Inner {
