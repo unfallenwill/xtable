@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// Top-level configuration.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
@@ -20,19 +20,6 @@ pub struct Config {
     pub storage: StorageConfig,
     #[serde(default)]
     pub observability: ObservabilityConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            auth: AuthConfig::default(),
-            backend: BackendConfig::default(),
-            txn: TxnConfig::default(),
-            storage: StorageConfig::default(),
-            observability: ObservabilityConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

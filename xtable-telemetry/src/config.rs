@@ -4,16 +4,11 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// OTLP transport protocol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OtlpProtocol {
+    #[default]
     Grpc,
     HttpProtobuf,
-}
-
-impl Default for OtlpProtocol {
-    fn default() -> Self {
-        OtlpProtocol::Grpc
-    }
 }
 
 /// Operational profile — drives sampler, env filters, and metric intervals.
@@ -26,6 +21,7 @@ pub enum Profile {
 }
 
 impl Profile {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Self, String> {
         match s.to_ascii_lowercase().as_str() {
             "dev" => Ok(Self::Dev),
