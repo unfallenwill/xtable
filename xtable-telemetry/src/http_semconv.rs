@@ -120,11 +120,3 @@ impl<B: std::fmt::Debug> OnFailure<B> for SemConvOnFailure {
     }
 }
 
-// Keep the unused-import lint happy when only the MakeSpan side is wired up
-// (e.g. in tests). `Status` is used by `OnResponse::set_status` above and
-// `OpenTelemetrySpanExt` by every span interaction, so this guard is here as
-// documentation, not silence.
-#[allow(dead_code)]
-fn _semconv_imports_used() {
-    let _: fn(&'static str) -> Status = |_| Status::Ok;
-}
