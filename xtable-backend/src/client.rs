@@ -3,7 +3,7 @@
 use crate::mock;
 use crate::mock::MockS3;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use aws_config::BehaviorVersion;
@@ -17,6 +17,15 @@ use aws_sdk_s3::Client;
 use crate::error::{BackendError, BackendResult};
 use crate::keymap::{IdentityKeyMap, KeyMap};
 use xtable_core::ObjectKey;
+use xtable_telemetry::metrics::Metrics;
+use xtable_telemetry::timed::Timed;
+use xtable_telemetry::KeyValue;
+
+/// Lazily-initialised `Metrics` bound to the global OTel meter.
+fn metrics() -> &'static Metrics {
+    static METRICS: OnceLock<Metrics> = OnceLock::new();
+    METRICS.get_or_init(Metrics::default)
+}
 
 /// Convenience: convert an `aws_sdk_s3::error::SdkError` to `BackendError`.
 fn map_sdk_err<E, R>(e: aws_sdk_s3::error::SdkError<E, R>) -> BackendError
@@ -117,7 +126,12 @@ impl BackendClient {
     }
 
     /// Head an object.
+    #[tracing::instrument(level = "info", name = "backend.s3.head", skip_all, fields(op = "head"), err)]
     pub async fn head_object(&self, key: &ObjectKey) -> BackendResult<HeadObjectResult> {
+        let _timed = Timed::new(
+            &metrics().backend_s3_duration,
+            vec![KeyValue::new("op", "head")],
+        );
         let bucket = self.inner.keymap.bucket_for(key);
         let backend_key = self.inner.keymap.backend_key(key).await;
         let resp = self
@@ -141,7 +155,12 @@ impl BackendClient {
     }
 
     /// Get an object's bytes.
+    #[tracing::instrument(level = "info", name = "backend.s3.get", skip_all, fields(op = "get"), err)]
     pub async fn get_object(&self, key: &ObjectKey) -> BackendResult<GetObjectResult> {
+        let _timed = Timed::new(
+            &metrics().backend_s3_duration,
+            vec![KeyValue::new("op", "get")],
+        );
         let bucket = self.inner.keymap.bucket_for(key);
         let backend_key = self.inner.keymap.backend_key(key).await;
         let resp = self
@@ -188,6 +207,10 @@ impl BackendClient {
         content_type: Option<&str>,
         metadata: HashMap<String, String>,
     ) -> BackendResult<PutObjectResult> {
+        let _timed = Timed::new(
+            &metrics().backend_s3_duration,
+            vec![KeyValue::new("op", "put")],
+        );
         let threshold = self.multipart_threshold();
         if body.len() as u64 >= threshold && threshold > 0 {
             return self
@@ -224,6 +247,7 @@ impl BackendClient {
     /// composite ETag (must differ from any individual part's ETag — that
     /// would mean S3 didn't actually combine them). Aborts the upload on
     /// any validation failure.
+    #[tracing::instrument(level = "info", name = "backend.s3.multipart", skip_all, fields(op = "multipart"), err)]
     async fn put_object_multipart(
         &self,
         key: &ObjectKey,
@@ -313,7 +337,12 @@ impl BackendClient {
     }
 
     /// Delete an object. Returns Ok(()) whether or not the key existed.
+    #[tracing::instrument(level = "info", name = "backend.s3.delete", skip_all, fields(op = "delete"), err)]
     pub async fn delete_object(&self, key: &ObjectKey) -> BackendResult<()> {
+        let _timed = Timed::new(
+            &metrics().backend_s3_duration,
+            vec![KeyValue::new("op", "delete")],
+        );
         let bucket = self.inner.keymap.bucket_for(key);
         let backend_key = self.inner.keymap.backend_key(key).await;
         let _ = self
@@ -429,6 +458,7 @@ impl BackendClient {
     }
 
     /// Create multipart upload.
+    #[tracing::instrument(level = "info", name = "backend.s3.create_multipart", skip_all, fields(op = "create_multipart"), err)]
     pub async fn create_multipart(&self, key: &ObjectKey) -> BackendResult<String> {
         let bucket = self.bucket_name();
         let backend_key = self.inner.keymap.backend_key(key).await;
@@ -445,6 +475,7 @@ impl BackendClient {
     }
 
     /// Upload a part. Returns its ETag.
+    #[tracing::instrument(level = "info", name = "backend.s3.upload_part", skip_all, fields(op = "upload_part"), err)]
     pub async fn upload_part(
         &self,
         key: &ObjectKey,
@@ -472,6 +503,7 @@ impl BackendClient {
     /// Complete a multipart upload. Returns the composite ETag reported
     /// by S3 (which may differ from any individual part's ETag — it's a
     /// hash of the concatenation).
+    #[tracing::instrument(level = "info", name = "backend.s3.complete_multipart", skip_all, fields(op = "complete_multipart"), err)]
     pub async fn complete_multipart(
         &self,
         key: &ObjectKey,
@@ -507,6 +539,7 @@ impl BackendClient {
     }
 
     /// Abort a multipart upload.
+    #[tracing::instrument(level = "info", name = "backend.s3.abort_multipart", skip_all, fields(op = "abort_multipart"), err)]
     pub async fn abort_multipart(&self, key: &ObjectKey, upload_id: &str) -> BackendResult<()> {
         let bucket = self.bucket_name();
         let backend_key = self.inner.keymap.backend_key(key).await;
@@ -524,6 +557,7 @@ impl BackendClient {
     }
 
     /// List object keys (paginated). Used by cold rebuild.
+    #[tracing::instrument(level = "info", name = "backend.s3.list", skip_all, fields(op = "list"), err)]
     pub async fn list_objects(&self) -> BackendResult<Vec<ListedObject>> {
         let bucket = self.bucket_name();
         let mut out: Vec<ListedObject> = Vec::new();
