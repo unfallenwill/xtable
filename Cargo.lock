@@ -4167,6 +4167,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "ulid",
+ "xtable-core",
 ]
 
 [[package]]

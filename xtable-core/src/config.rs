@@ -144,15 +144,55 @@ impl Default for StorageConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ObservabilityConfig {
-    pub otlp_endpoint: String,
-    pub metrics_listen: String,
+    #[serde(default = "default_service_name")]
+    pub service_name: String,
+    #[serde(default)]
+    pub service_instance_id: Option<String>,
+    #[serde(default = "default_environment")]
+    pub environment: String,
+    #[serde(default = "default_profile")]
+    pub profile: String, // "dev" | "staging" | "production" | "debug"
+    #[serde(default)]
+    pub trace_sample_ratio: Option<f64>,
+    #[serde(default = "default_metric_interval")]
+    pub metric_export_interval_secs: u64,
+    #[serde(default = "default_shutdown_timeout")]
+    pub shutdown_flush_timeout_secs: u64,
+    #[serde(default)]
+    pub enable_per_table_metrics: bool,
+}
+
+fn default_service_name() -> String {
+    "xtable".into()
+}
+
+fn default_environment() -> String {
+    std::env::var("XTABLE_ENV").unwrap_or_else(|_| "dev".into())
+}
+
+fn default_profile() -> String {
+    "production".into()
+}
+
+fn default_metric_interval() -> u64 {
+    60
+}
+
+fn default_shutdown_timeout() -> u64 {
+    10
 }
 
 impl Default for ObservabilityConfig {
     fn default() -> Self {
         Self {
-            otlp_endpoint: String::new(),
-            metrics_listen: "127.0.0.1:9090".to_string(),
+            service_name: default_service_name(),
+            service_instance_id: None,
+            environment: default_environment(),
+            profile: default_profile(),
+            trace_sample_ratio: None,
+            metric_export_interval_secs: default_metric_interval(),
+            shutdown_flush_timeout_secs: default_shutdown_timeout(),
+            enable_per_table_metrics: false,
         }
     }
 }
