@@ -14,6 +14,12 @@ pub trait XtableAuthenticator: Send + Sync {
 pub struct EdgeAuth {
     pub creds: Arc<CredentialStore>,
     pub allow_anonymous_read: bool,
+    /// Region used for SigV4 signature verification. SigV4 folds the region
+    /// into the HMAC signing key, so this must match the region the client
+    /// used when signing. Read from `[backend].region` in production;
+    /// non-AWS S3-compatible providers (volcengine TOS, etc.) require the
+    /// bucket's actual region — `us-east-1` is only correct for AWS.
+    pub region: String,
 }
 
 impl std::fmt::Debug for EdgeAuth {
@@ -64,17 +70,26 @@ pub fn verify_request<B>(
         .lookup(&ak)
         .ok_or_else(|| XtableError::Unauthorized(format!("unknown access key: {}", ak)))?;
 
-    verify_sigv4_signature(req, &ak, &_entry.secret_access_key)?;
+    verify_sigv4_signature(req, &ak, &_entry.secret_access_key, &auth.region)?;
 
     Ok(())
 }
 
 /// Hand-rolled SigV4 verification. Matches the canonical request format used
 /// by xtable's middleware (which s3s's verifier, and our probe, also use).
+///
+/// `region` must match the region the client used when signing — SigV4 folds
+/// the region into the HMAC signing key, so a mismatch produces a different
+/// signature and verification fails. Production callers pass
+/// `&auth.region`, which is populated from `[backend].region` in the
+/// server config. Non-AWS S3-compatible providers (volcengine TOS, etc.)
+/// require the bucket's actual region here; `us-east-1` is only correct
+/// for AWS.
 pub fn verify_sigv4_signature<B>(
     req: &http::Request<B>,
     access_key_id: &str,
     secret_access_key: &str,
+    region: &str,
 ) -> Result<(), XtableError> {
     use sha2::{Digest, Sha256};
 
@@ -131,8 +146,12 @@ pub fn verify_sigv4_signature<B>(
         .unwrap_or("UNSIGNED-PAYLOAD")
         .to_string();
 
+    // SigV4 spec: each section is newline-terminated; the empty line
+    // between CanonicalHeaders and SignedHeaders is a single `\n` after
+    // the headers' trailing `\n`. With `canonical_headers` already ending
+    // in `\n`, the separator is one additional `\n`.
     let canonical_request = format!(
-        "{}\n{}\n{}\n{}{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}",
         req.method(),
         req.uri().path(),
         req.uri().query().unwrap_or(""),
@@ -147,13 +166,13 @@ pub fn verify_sigv4_signature<B>(
     };
 
     let date_short = &date[..8];
-    let scope = format!("{}/us-east-1/s3/aws4_request", date_short);
+    let scope = format!("{}/{}/s3/aws4_request", date_short, region);
     let string_to_sign =
         format!("AWS4-HMAC-SHA256\n{}\n{}\n{}", date, scope, canonical_request_hash);
 
     let k_secret = format!("AWS4{}", secret_access_key);
     let k_date = hmac_sha256(k_secret.as_bytes(), date_short.as_bytes());
-    let k_region = hmac_sha256(&k_date, b"us-east-1");
+    let k_region = hmac_sha256(&k_date, region.as_bytes());
     let k_service = hmac_sha256(&k_region, b"s3");
     let k_signing = hmac_sha256(&k_service, b"aws4_request");
     let computed = hex::encode(hmac_sha256(&k_signing, string_to_sign.as_bytes()));
@@ -207,6 +226,7 @@ mod tests {
         EdgeAuth {
             creds: store,
             allow_anonymous_read: allow_anon,
+            region: "us-east-1".into(),
         }
     }
 
@@ -255,7 +275,7 @@ mod tests {
             host, payload_hash, date
         );
         let canonical_request = format!(
-            "GET\n{}\n{}\n{}{}\n{}",
+            "GET\n{}\n{}\n{}\n{}\n{}",
             canonical_uri, canonical_querystring, canonical_headers, signed_headers, payload_hash
         );
         let canonical_request_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));

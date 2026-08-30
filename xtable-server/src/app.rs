@@ -43,6 +43,11 @@ impl AppState {
         let auth = Arc::new(EdgeAuth {
             creds,
             allow_anonymous_read: config.auth.allow_anonymous_read,
+            // Region participates in the SigV4 HMAC chain, so the verifier
+            // must use the same region the client signed with. We pin it to
+            // the backend bucket region — non-AWS providers like volcengine
+            // TOS reject signatures built with any other region.
+            region: config.backend.region.clone(),
         });
         let backend_arc = Arc::new(backend);
         // The structured-data-space layer owns the only transaction coordinator

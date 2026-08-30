@@ -25,6 +25,9 @@ staged/
 # Secrets / local config
 .env
 .claude/settings.local.json
+xtable.local.toml
+xtable.*.local.toml
+/tmp/xtable-test
 
 # Internal design docs (specs, plans) — keep local, not for upstream review
 docs/superpowers/

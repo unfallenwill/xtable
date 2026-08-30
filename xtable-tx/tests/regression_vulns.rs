@@ -504,7 +504,7 @@ fn unit_v15_sigv4_verification_works() {
         }
         .into_entry(),
     );
-    let auth = EdgeAuth { creds: store, allow_anonymous_read: false };
+    let auth = EdgeAuth { creds: store, allow_anonymous_read: false, region: "us-east-1".into() };
 
     // Build a properly-signed SigV4 request.
     let body = b"";
@@ -521,7 +521,7 @@ fn unit_v15_sigv4_verification_works() {
         host, payload_hash, date
     );
     let canonical_request = format!(
-        "GET\n{}\n\n{}{}\n{}",
+        "GET\n{}\n\n{}\n{}\n{}",
         canonical_uri, canonical_headers, signed_headers, payload_hash
     );
     let canonical_request_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
