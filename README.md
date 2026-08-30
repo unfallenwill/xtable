@@ -115,9 +115,10 @@ This is the heart of xtable. If you remember only one section, read this one.
 
 ### State machine
 
-After the OCC→MVCC+SSI rewrite, the state machine is much simpler — the
-OCC `Validating` phase is gone; SSI cycle detection runs inside `commit()`
-under the SI lock manager's interior mutex:
+The state machine is `Active → Committing → {Committed, Aborted}`.
+SI locks are acquired during the `Active` phase; the `Committing` phase
+runs Cahill cycle detection, S3 uploads, atomic chain append, and
+MemTable publish under the SI lock manager's interior mutex:
 
 ```
                         BeginTxn
@@ -137,8 +138,9 @@ under the SI lock manager's interior mutex:
                    (terminal)         (terminal)
 ```
 
-`Validating` no longer exists. The Cahill cycle walk replaces the
-per-write OCC `current > version_at_read` check.
+The Cahill cycle walk detects rw-antidependency structures between the
+txn's SI edges and any peer's edges; one txn in the cycle is aborted
+(lexicographically larger txn_id loses).
 
 ### CommitTxn — exact order (critical for crash safety)
 
@@ -280,8 +282,8 @@ On startup, if `redb` cannot be opened (or is empty):
 ### Crash recovery (recovery.rs)
 
 On startup, replay the WAL once. For each txn with a non-terminal status:
-- Last record is `Begin` / `Stage` / `ValidateOk` (no `Committing`) → no
-  backend uploads happened. Mark `Aborted`. Drop staged bodies.
+- Last record is `Begin` / `Stage` (no `Committing`) → no backend
+  uploads happened. Mark `Aborted`. Drop staged bodies.
 - Last record is `Committing` (no `Committed`) → may have partial
   uploads. Read `Committing.upload_keys`, compensating-delete each via
   `DeleteObject`. Mark `Aborted`.
@@ -296,9 +298,9 @@ whose `last_heartbeat + timeout` has elapsed.
 
 A single, narrow window of unavoidable data loss exists:
 
-> A transaction has completed OCC validation, all backend uploads have
-> ack'd, but the `versions` index in `redb` has not yet been published —
-> the local medium is destroyed in this exact window.
+> A transaction has reached the `Committing` state with all backend
+> uploads ack'd, but the `versions` index in `redb` has not yet been
+> published — the local medium is destroyed in this exact window.
 
 The `versions` bump is a single redb write transaction that takes
 microseconds. The window is small, but non-zero. Mitigations:
@@ -338,7 +340,7 @@ POST   /v1/spaces/:space/tables/:table/bind   Bind table to schema. Body: {body}
 ### Records
 
 ```
-POST   /v1/spaces/:space/tables/:table/records         Upsert. Body: {record_id?, body, expected_schema_version?}.
+POST   /v1/spaces/:space/tables/:table/records         Upsert. Body: {record_id?, body}.
                                                      → 201 {record_id, schema_version, backend_key, commit_version}
 GET    /v1/spaces/:space/tables/:table/records         Query.   ?snapshot=&limit=&offset=&sort=&dir=
                                                      &filter_field=&filter_op=&filter_value=

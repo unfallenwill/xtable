@@ -102,9 +102,6 @@ pub struct RecordWrite {
     pub table: String,
     pub record_id: Option<String>,
     pub body: Value,
-    /// Optimistic-concurrency: if Some, current `schema_version` of the
-    /// table must equal this, else the write is rejected before stage.
-    pub expected_schema_version: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -472,26 +469,10 @@ impl StructuredSpace {
             let schema = JsonSchema(body_value);
             validate(&schema, &write.body).map_err(schema_validation_err)?;
         }
-        if let Some(expected) = write.expected_schema_version {
-            let cur = schema_version.unwrap_or(0);
-            if expected != cur {
-                return Err(XtableError::Conflict(format!(
-                    "expected_schema_version={expected} != current={cur}"
-                )));
-            }
-        }
-        // Optimistic concurrency: refuse if existing record is ahead.
         let record_id = match write.record_id.clone() {
             Some(id) => id,
             None => ulid::Ulid::new().to_string(),
         };
-        if let Some(existing) = self.store.get_record_index(&space, &table, &record_id)? {
-            if existing.commit_version > t.snapshot_version {
-                return Err(XtableError::Conflict(format!(
-                    "record {record_id} modified concurrently"
-                )));
-            }
-        }
         let backend_key = record_key(&space, &table, &record_id)?;
         let body_bytes = serde_json::to_vec(&write.body).map_err(XtableError::from)?;
         let mut meta = HashMap::new();
@@ -545,11 +526,6 @@ impl StructuredSpace {
             .store
             .get_record_index(space, table, record_id)?
             .ok_or_else(|| XtableError::not_found(format!("record {record_id}")))?;
-        if cur.commit_version > t.snapshot_version {
-            return Err(XtableError::Conflict(format!(
-                "record {record_id} modified concurrently"
-            )));
-        }
         let backend_key = record_key(space, table, record_id)?;
         let mut meta = HashMap::new();
         meta.insert("x-xtable-kind".to_string(), "record".to_string());
@@ -1000,8 +976,7 @@ mod tests {
                 table: "tasks".into(),
                 record_id: Some("a".into()),
                 body: json!({"title": "alpha", "done": false}),
-                expected_schema_version: None,
-            },
+                            },
         )
         .await
         .unwrap();
@@ -1030,8 +1005,7 @@ mod tests {
                     table: "tasks".into(),
                     record_id: None,
                     body: json!({"no_title": true}),
-                    expected_schema_version: None,
-                },
+                                    },
             )
             .await
             .unwrap_err();
@@ -1049,8 +1023,7 @@ mod tests {
                 table: "tasks".into(),
                 record_id: Some("x".into()),
                 body: json!({"title": "x"}),
-                expected_schema_version: None,
-            },
+                            },
         )
         .await
         .unwrap();
@@ -1074,8 +1047,7 @@ mod tests {
                 table: "tasks".into(),
                 record_id: Some("nope".into()),
                 body: json!({"title": "x"}),
-                expected_schema_version: None,
-            },
+                            },
         )
         .await
         .unwrap();
@@ -1095,8 +1067,7 @@ mod tests {
                     table: "tasks".into(),
                     record_id: Some(id.into()),
                     body: json!({"title": format!("title-{id}"), "n": (id.as_bytes()[0] as u64)}),
-                    expected_schema_version: None,
-                },
+                                    },
             )
             .await
             .unwrap();
@@ -1122,8 +1093,7 @@ mod tests {
                 table: "t".into(),
                 record_id: Some("r".into()),
                 body: json!({"v": 1}),
-                expected_schema_version: None,
-            },
+                            },
         )
         .await
         .unwrap();
@@ -1136,8 +1106,7 @@ mod tests {
                 table: "t".into(),
                 record_id: Some("r".into()),
                 body: json!({"v": 2}),
-                expected_schema_version: None,
-            },
+                            },
         )
         .await
         .unwrap();
@@ -1193,8 +1162,7 @@ mod tests {
                 table: "t".into(),
                 record_id: Some("r".into()),
                 body: json!({"v": 1}),
-                expected_schema_version: None,
-            },
+                            },
         )
         .await
         .unwrap();
@@ -1212,41 +1180,6 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.http_status(), 400);
-    }
-
-    #[tokio::test]
-    async fn upsert_rejects_conflicting_modification() {
-        let (sp, _t) = setup().await;
-        let t1 = sp.begin_txn().await.unwrap();
-        sp.upsert_record(
-            &t1,
-            RecordWrite {
-                space: "s".into(),
-                table: "t".into(),
-                record_id: Some("r".into()),
-                body: json!({"v": 1}),
-                expected_schema_version: None,
-            },
-        )
-        .await
-        .unwrap();
-        sp.commit_txn(&t1).await.unwrap();
-
-        let t2 = sp.begin_txn().await.unwrap();
-        let err = sp
-            .upsert_record(
-                &t2,
-                RecordWrite {
-                    space: "s".into(),
-                    table: "t".into(),
-                    record_id: Some("r".into()),
-                    body: json!({"v": 2}),
-                    expected_schema_version: Some(42),
-                },
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(err.http_status(), 409);
     }
 
     #[tokio::test]
@@ -1296,8 +1229,7 @@ mod tests {
                     table: "tasks".into(),
                     record_id: None,
                     body: json!({"n": 1}),
-                    expected_schema_version: None,
-                },
+                                    },
             )
             .await
             .unwrap_err();
@@ -1335,8 +1267,7 @@ mod tests {
                 table: "t".into(),
                 record_id: Some("r".into()),
                 body: json!({"x": 1}),
-                expected_schema_version: None,
-            },
+                            },
         )
         .await
         .unwrap();

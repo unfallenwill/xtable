@@ -243,7 +243,6 @@ async fn bind_table(
 struct UpsertRecordReq {
     record_id: Option<String>,
     body: Value,
-    expected_schema_version: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -287,7 +286,6 @@ async fn upsert_record(
                     table: table_in,
                     record_id: req.record_id.clone(),
                     body: req.body.clone(),
-                    expected_schema_version: req.expected_schema_version,
                 },
             )
             .await?;
