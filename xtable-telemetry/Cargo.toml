@@ -10,7 +10,7 @@ xtable-core = { path = "../xtable-core" }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
-opentelemetry-semantic-conventions = { workspace = true }
+opentelemetry-semantic-conventions = { workspace = true, features = ["semconv_experimental"] }
 opentelemetry-appender-tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 tracing = { workspace = true }
