@@ -32,3 +32,5 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
+insta = { version = "1", features = ["yaml"] }
+tracing-subscriber = { workspace = true, features = ["registry"] }

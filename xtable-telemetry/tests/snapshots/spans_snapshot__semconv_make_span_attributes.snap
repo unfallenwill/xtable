@@ -1,0 +1,16 @@
+---
+source: xtable-telemetry/tests/spans_snapshot.rs
+expression: span
+---
+name: HTTP
+fields:
+  http.request.body.size: "0"
+  http.request.method: GET
+  http.route: unknown
+  network.protocol.name: http
+  network.protocol.version: HTTP/1.1
+  otel.kind: server
+  otel.status_code: OK
+  url.path: /v1/spaces/acme/tables/users/records
+  url.scheme: http
+  user_agent.original: xtable-test/1.0
