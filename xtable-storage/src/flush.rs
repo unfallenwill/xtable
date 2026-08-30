@@ -25,6 +25,7 @@
 //! out-of-band.
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use crate::cf::meta_key;
@@ -32,6 +33,15 @@ use crate::chunk::{ChunkEntry, ChunkIndexEntry, ChunkWriter};
 use crate::memtable::{MemEntry, MemTable, MemTableSet};
 use crate::wal::WalRecord;
 use xtable_core::XtableResult;
+use xtable_telemetry::metrics::Metrics;
+use xtable_telemetry::timed::Timed;
+use xtable_telemetry::KeyValue;
+
+/// Lazily-initialised `Metrics` bound to the global OTel meter.
+fn metrics() -> &'static Metrics {
+    static METRICS: OnceLock<Metrics> = OnceLock::new();
+    METRICS.get_or_init(Metrics::default)
+}
 
 /// Default cap on concurrent flush tasks.
 pub const DEFAULT_FLUSH_CONCURRENCY: usize = 4;
@@ -39,6 +49,7 @@ pub const DEFAULT_FLUSH_CONCURRENCY: usize = 4;
 /// Run the flush loop indefinitely, picking up immutable memtables as
 /// they arrive. Each immutable is flushed in `flush_one`. Caller is
 /// responsible for spawning the loop (typically once at server start).
+#[tracing::instrument(level = "info", name = "flush.loop", skip_all, err)]
 pub async fn flush_loop(
     memtables: Arc<MemTableSet>,
     store: crate::store::LocalStore,
@@ -61,11 +72,16 @@ pub async fn flush_loop(
 
 /// Flush a single immutable memtable. Public so tests can drive it
 /// synchronously without running the full loop.
+#[tracing::instrument(level = "info", name = "memtable.flush", skip_all, err)]
 pub async fn flush_one(
     mt: &Arc<MemTable>,
     store: &crate::store::LocalStore,
     backend: Arc<xtable_backend::BackendClient>,
 ) -> XtableResult<()> {
+    let _timed = Timed::new(
+        &metrics().memtable_flush_duration,
+        vec![KeyValue::new("op", "flush")],
+    );
     let started = Instant::now();
 
     // 1. Build chunk_id and stats.
@@ -230,11 +246,16 @@ fn compute_shard(key_min: &[u8]) -> u8 {
 /// Upload a chunk file to S3. PR-Fix3.2: collapsed to a single
 /// `put_object` call; multipart wiring lands when `BackendClient`
 /// grows multipart support (see M5 review item).
+#[tracing::instrument(level = "info", name = "chunk.upload", skip_all, fields(op = "chunk.upload"), err)]
 async fn upload_chunk(
     backend: &xtable_backend::BackendClient,
     s3_key: &str,
     file_bytes: Vec<u8>,
 ) -> XtableResult<String> {
+    let _timed = Timed::new(
+        &metrics().chunk_upload_duration,
+        vec![KeyValue::new("op", "chunk.upload")],
+    );
     use std::collections::HashMap;
     use xtable_core::ObjectKey;
 
@@ -282,6 +303,7 @@ impl crate::store::LocalStore {
     /// Truncate WAL rows with `seq <= up_to_seq`. Returns the number of
     /// rows removed. PR-Fix3.1: collapsed `truncate_wal_up_to`,
     /// `truncate_wal_strict`, and `truncate_wal` into one.
+    #[tracing::instrument(level = "info", name = "wal.truncate", skip_all, fields(op = "wal.truncate"), err)]
     pub fn truncate_wal(&self, up_to_seq: u64) -> XtableResult<usize> {
         use redb::ReadableTable;
         let mut removed = 0;

@@ -4,6 +4,8 @@
 //! Phase 2 surfaces: WAL, txn_state, read/write sets, staged blobs.
 //! Phase 4 surfaces (LSM-tree rewrite): MemTable, chunks, flush, read.
 
+#![recursion_limit = "256"]
+
 pub mod blob;
 pub mod cf;
 pub mod chunk;

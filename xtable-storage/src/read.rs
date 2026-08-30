@@ -16,11 +16,21 @@
 //! Range-GET support lands in PR #4+ via `BackendClient::get_object_range`.
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use crate::chunk::{bloom_may_contain, decode_body_entries, decompress_body, ChunkIndexEntry};
 use crate::memtable::{MemTableSet, RecordKey};
 use crate::store::LocalStore;
 use xtable_core::{ObjectKey, XtableResult};
+use xtable_telemetry::metrics::Metrics;
+use xtable_telemetry::timed::Timed;
+use xtable_telemetry::KeyValue;
+
+/// Lazily-initialised `Metrics` bound to the global OTel meter.
+fn metrics() -> &'static Metrics {
+    static METRICS: OnceLock<Metrics> = OnceLock::new();
+    METRICS.get_or_init(Metrics::default)
+}
 
 /// Outcome of a read at a snapshot.
 #[derive(Clone)]
@@ -47,6 +57,7 @@ pub enum ReadSource {
 /// Read at snapshot. Walks active memtable → immutables → record index →
 /// chunk index → S3 GET, in that order. Honors snapshot isolation: only
 /// entries with `commit_version <= snapshot` are visible.
+#[tracing::instrument(level = "debug", name = "chunk.download", skip_all, fields(op = "chunk.download"), err)]
 pub async fn read_at_snapshot(
     mems: &Arc<MemTableSet>,
     store: &LocalStore,
@@ -56,6 +67,10 @@ pub async fn read_at_snapshot(
     record_id: &str,
     snapshot: u64,
 ) -> XtableResult<Option<ReadResult>> {
+    let _timed = Timed::new(
+        &metrics().chunk_download_duration,
+        vec![KeyValue::new("op", "chunk.download")],
+    );
     let key: RecordKey = (space.to_string(), table.to_string(), record_id.to_string());
 
     // 1. Active memtable.

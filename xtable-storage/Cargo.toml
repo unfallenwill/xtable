@@ -8,7 +8,9 @@ license.workspace = true
 [dependencies]
 xtable-core = { path = "../xtable-core" }
 xtable-backend = { path = "../xtable-backend" }
+xtable-telemetry = { path = "../xtable-telemetry" }
 
+opentelemetry = { workspace = true }
 redb = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -19,7 +19,7 @@
 //! `commit_version <= snapshot`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -28,6 +28,15 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use xtable_core::XtableResult;
+use xtable_telemetry::metrics::Metrics;
+use xtable_telemetry::timed::Timed;
+use xtable_telemetry::KeyValue;
+
+/// Lazily-initialised `Metrics` bound to the global OTel meter.
+fn metrics() -> &'static Metrics {
+    static METRICS: OnceLock<Metrics> = OnceLock::new();
+    METRICS.get_or_init(Metrics::default)
+}
 
 /// Composite record key: `(space, table, record_id)`.
 pub type RecordKey = (String, String, String);
@@ -161,6 +170,7 @@ impl MemTable {
 
     /// Stage an entry as **invisible**. Returns the size estimate delta
     /// added by this insert.
+    #[tracing::instrument(level = "debug", skip_all, fields(op = "put_invisible"), err)]
     pub fn put_invisible(&self, entry: MemEntry) -> XtableResult<u64> {
         let size_delta = entry.size_bytes.max(64);
         let key = entry.key.clone();
@@ -180,6 +190,7 @@ impl MemTable {
     /// We can't efficiently look up by `(key, wal_seq)` in a DashMap, so
     /// we iterate to find it. With small per-key staging windows this is
     /// O(staged_per_key) per call.
+    #[tracing::instrument(level = "debug", skip_all, fields(op = "publish"))]
     pub fn publish(&self, key: &RecordKey, _wal_seq: u64, commit_version: u64) {
         if let Some(entry) = self.map.get(key) {
             entry.value().commit_version.store(commit_version, Ordering::Release);
@@ -189,6 +200,7 @@ impl MemTable {
     }
 
     /// Look up the entry for `key` if visible at `snapshot`.
+    #[tracing::instrument(level = "debug", skip_all, fields(op = "get_visible"))]
     pub fn get_visible(&self, key: &RecordKey, snapshot: u64) -> Option<Arc<MemEntry>> {
         let entry = self.map.get(key)?;
         if entry.value().visible_at(snapshot) {
@@ -296,7 +308,12 @@ impl MemTableSet {
 
     /// Stage an entry into the active memtable. Returns the size delta
     /// and (if rotation happened) a notification that a flush may begin.
+    #[tracing::instrument(level = "info", name = "memtable.put", skip_all, fields(op = "put"), err)]
     pub fn put_invisible(&self, entry: MemEntry) -> XtableResult<u64> {
+        let _timed = Timed::new(
+            &metrics().memtable_write_duration,
+            vec![KeyValue::new("op", "put")],
+        );
         let active = self.active.read().clone();
         let delta = active.put_invisible(entry)?;
         if active.should_flush(&self.policy) {
@@ -310,6 +327,7 @@ impl MemTableSet {
     /// Walks active → immutables (newest-first) so the publish lands
     /// even when `maybe_rotate` has already moved the entry into an
     /// immutable memtable between `put_invisible` and `publish`.
+    #[tracing::instrument(level = "debug", skip_all, fields(op = "publish"))]
     pub fn publish(&self, key: &RecordKey, wal_seq: u64, commit_version: u64) {
         // Active first (most likely location).
         {
@@ -325,6 +343,7 @@ impl MemTableSet {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(op = "rotate"))]
     fn maybe_rotate(&self, current_active: &Arc<MemTable>) -> XtableResult<()> {
         let mut w = self.active.write();
         if !Arc::ptr_eq(&*w, current_active) {

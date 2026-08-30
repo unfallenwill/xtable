@@ -48,9 +48,19 @@
 
 use bytes::BytesMut;
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 use xxhash_rust::xxh3;
 
 use xtable_core::XtableResult;
+use xtable_telemetry::metrics::Metrics;
+use xtable_telemetry::timed::Timed;
+use xtable_telemetry::KeyValue;
+
+/// Lazily-initialised `Metrics` bound to the global OTel meter.
+fn metrics() -> &'static Metrics {
+    static METRICS: OnceLock<Metrics> = OnceLock::new();
+    METRICS.get_or_init(Metrics::default)
+}
 
 /// Magic bytes for chunk files.
 pub const CHUNK_MAGIC: &[u8; 4] = b"XTC1";
@@ -100,7 +110,12 @@ pub struct ChunkHeader {
 }
 
 impl ChunkHeader {
+    #[tracing::instrument(level = "info", name = "chunk.encode", skip_all, fields(op = "chunk.encode"), err)]
     pub fn encode(&self) -> XtableResult<Vec<u8>> {
+        let _timed = Timed::new(
+            &metrics().chunk_upload_duration,
+            vec![KeyValue::new("op", "chunk.encode")],
+        );
         let mut buf = BytesMut::new();
         buf.extend_from_slice(CHUNK_MAGIC);
         buf.extend_from_slice(&CHUNK_VERSION.to_le_bytes());
@@ -126,7 +141,12 @@ impl ChunkHeader {
     }
 
     /// Parse a header from the start of `buf`. Returns `(header, body_offset)`.
+    #[tracing::instrument(level = "info", name = "chunk.decode", skip_all, fields(op = "chunk.decode"), err)]
     pub fn decode(buf: &[u8]) -> XtableResult<(Self, usize)> {
+        let _timed = Timed::new(
+            &metrics().chunk_download_duration,
+            vec![KeyValue::new("op", "chunk.decode")],
+        );
         if buf.len() < 4 + 2 || &buf[0..4] != CHUNK_MAGIC {
             return Err(xtable_core::XtableError::Storage(
                 "chunk magic mismatch".into(),
@@ -243,6 +263,7 @@ pub struct ChunkFooter {
 }
 
 impl ChunkFooter {
+    #[tracing::instrument(level = "debug", skip_all, fields(op = "footer.encode"), err)]
     pub fn encode(&self) -> XtableResult<Vec<u8>> {
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&(self.bloom.len() as u32).to_le_bytes());
@@ -257,6 +278,7 @@ impl ChunkFooter {
     }
 
     /// Parse a footer from the end of `buf` (must include the FOOTER_MAGIC).
+    #[tracing::instrument(level = "debug", skip_all, fields(op = "footer.decode"), err)]
     pub fn decode(buf: &[u8]) -> XtableResult<Self> {
         if buf.len() < 4 + 4 || &buf[buf.len() - 4..] != FOOTER_MAGIC {
             return Err(xtable_core::XtableError::Storage(

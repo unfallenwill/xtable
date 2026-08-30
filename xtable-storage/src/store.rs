@@ -12,7 +12,7 @@
 //! - multipart (Phase 3 in-flight uploads)
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use redb::{Database, ReadableTable};
 
@@ -32,6 +32,15 @@ use crate::version_index::VersionRecord;
 use crate::wal::WalRecord;
 use xtable_core::headers::TxnStatus;
 use xtable_core::{ObjectKey, XtableError, XtableResult};
+use xtable_telemetry::metrics::Metrics;
+use xtable_telemetry::timed::Timed;
+use xtable_telemetry::KeyValue;
+
+/// Lazily-initialised `Metrics` bound to the global OTel meter.
+fn metrics() -> &'static Metrics {
+    static METRICS: OnceLock<Metrics> = OnceLock::new();
+    METRICS.get_or_init(Metrics::default)
+}
 
 pub(crate) fn redb_err<E: std::fmt::Display>(e: E) -> XtableError {
     XtableError::Storage(e.to_string())
@@ -144,6 +153,8 @@ impl LocalStore {
         })
     }
 
+    /// Insert or update a version-record row.
+    #[tracing::instrument(level = "debug", skip_all, fields(op = "store.put"), err)]
     pub fn put_version(
         &self,
         key: &ObjectKey,
@@ -193,7 +204,12 @@ impl LocalStore {
     }
 
     /// Append a WAL record. Returns the seq number used.
+    #[tracing::instrument(level = "info", name = "wal.append", skip_all, fields(op = "wal.append"), err)]
     pub fn append_wal(&self, record: &WalRecord) -> XtableResult<u64> {
+        let _timed = Timed::new(
+            &metrics().wal_append_duration,
+            vec![KeyValue::new("op", "wal.append")],
+        );
         let bytes = bincode::serialize(record).map_err(XtableError::from)?;
         self.with_write(|txn| {
             let mut meta = txn.open_table(TBL_META).map_err(redb_err)?;
@@ -406,6 +422,7 @@ impl LocalStore {
     // ===== MVCC version-chain operations =====
 
     /// Read the full chain for a key.
+    #[tracing::instrument(level = "debug", skip_all, fields(op = "store.scan"), err)]
     pub fn read_chain(&self, key: &str) -> XtableResult<VersionChain> {
         self.with_read(|txn| {
             let tbl = txn.open_table(TBL_VERSION_CHAINS).map_err(redb_err)?;
@@ -704,6 +721,7 @@ impl LocalStore {
         })
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(op = "store.delete"), err)]
     pub fn delete_record_index(&self, space: &str, table: &str, record_id: &str) -> XtableResult<()> {
         self.with_write(|txn| {
             let mut tbl = txn.open_table(TBL_RECORD_INDEX).map_err(redb_err)?;
