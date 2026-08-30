@@ -274,6 +274,15 @@ impl Default for Metrics {
     /// unconditionally — recordings are silently dropped when no exporter is
     /// attached, and start flowing as soon as `telemetry::init()` wires a
     /// real `SdkMeterProvider`.
+    ///
+    /// **Sequencing contract:** `Metrics::default()` binds instruments to the
+    /// `Meter` returned by `global::meter("xtable")` at the moment of
+    /// construction. OTel 0.27 instruments are permanently bound to their
+    /// creating `Meter` — calling `global::set_meter_provider(...)` AFTER
+    /// construction does not redirect already-built instruments. Callers
+    /// MUST construct `Metrics` AFTER `xtable_telemetry::init::init(cfg)`
+    /// has run (which sets the global provider), so the instruments bind
+    /// to the live `SdkMeterProvider`.
     fn default() -> Self {
         let meter = opentelemetry::global::meter("xtable");
         Self::new(&meter)
