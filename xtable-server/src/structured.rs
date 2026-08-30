@@ -7,6 +7,14 @@
 //! `txn_id` and pass it back through the structured-space APIs.
 //!
 //! Error responses are JSON: `{"error": "<msg>", "code": "<s3-style>"}`.
+//!
+//! Observability (Phase 6, Task 6.3):
+//! - Every handler is wrapped in `#[tracing::instrument]` so it emits a
+//!   span with `space` / `table` / `record_id` attributes as appropriate.
+//! - Write paths additionally hold a `Timed` guard against
+//!   `state.metrics.txn_commit_duration` and bump
+//!   `state.metrics.txn_commit_total{outcome=ok|err}` so the commit
+//!   hot-path is visible on dashboards.
 
 use std::sync::Arc;
 
@@ -23,6 +31,8 @@ use xtable_core::{XtableError, XtableResult};
 use xtable_schema::{
     Filter, OrderDir, Query as StructuredQuery, RecordWrite, WriteOutcome,
 };
+use xtable_telemetry::timed::Timed;
+use xtable_telemetry::KeyValue;
 
 use crate::app::AppState;
 
@@ -50,11 +60,23 @@ struct RegisterSchemaReq {
     body: Value,
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "register_schema",
+    skip_all,
+    fields(space = %space, op = "register_schema"),
+
+
+)]
 async fn register_schema(
     State(state): State<Arc<AppState>>,
     Path(space): Path<String>,
     Json(req): Json<RegisterSchemaReq>,
 ) -> Response {
+    let _timed = Timed::new(
+        &state.metrics.txn_commit_duration,
+        vec![KeyValue::new("space", space.clone())],
+    );
     let space_in = space.clone();
     let name_in = req.name.clone();
     let body_in = req.body.clone();
@@ -68,12 +90,19 @@ async fn register_schema(
         Ok(v)
     }
     .await;
+    state.metrics.txn_commit_total.add(
+        1,
+        &[KeyValue::new(
+            "outcome",
+            if result.is_ok() { "ok" } else { "err" },
+        )],
+    );
     match result {
         Ok(version) => (
             StatusCode::CREATED,
             Json(json!({ "version": version, "name": req.name })),
         )
-            .into_response(),
+        .into_response(),
         Err(e) => error_response(e),
     }
 }
@@ -84,6 +113,14 @@ struct SchemaQuery {
     snapshot: Option<String>,
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "get_schema",
+    skip_all,
+    fields(space = %space, name = %name, op = "get_schema"),
+
+
+)]
 async fn get_schema(
     State(state): State<Arc<AppState>>,
     Path((space, name)): Path<(String, String)>,
@@ -111,12 +148,20 @@ async fn get_schema(
                 "body": info.body,
             })),
         )
-            .into_response(),
+        .into_response(),
         Ok(None) => not_found(),
         Err(e) => error_response(e),
     }
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "list_schemas",
+    skip_all,
+    fields(space = %space, op = "list_schemas"),
+
+
+)]
 async fn list_schemas(
     State(state): State<Arc<AppState>>,
     Path(space): Path<String>,
@@ -138,7 +183,7 @@ async fn list_schemas(
                 })).collect::<Vec<_>>(),
             })),
         )
-            .into_response(),
+        .into_response(),
         Err(e) => error_response(e),
     }
 }
@@ -148,11 +193,26 @@ struct BindReq {
     body: Value,
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "bind_table",
+    skip_all,
+    fields(space = %space, table = %table, op = "bind_table"),
+
+
+)]
 async fn bind_table(
     State(state): State<Arc<AppState>>,
     Path((space, table)): Path<(String, String)>,
     Json(req): Json<BindReq>,
 ) -> Response {
+    let _timed = Timed::new(
+        &state.metrics.txn_commit_duration,
+        vec![
+            KeyValue::new("space", space.clone()),
+            KeyValue::new("table", table.clone()),
+        ],
+    );
     let space_in = space.clone();
     let table_in = table.clone();
     let body_in = req.body.clone();
@@ -166,6 +226,13 @@ async fn bind_table(
         Ok(())
     }
     .await;
+    state.metrics.txn_commit_total.add(
+        1,
+        &[KeyValue::new(
+            "outcome",
+            if result.is_ok() { "ok" } else { "err" },
+        )],
+    );
     match result {
         Ok(()) => (StatusCode::NO_CONTENT, "").into_response(),
         Err(e) => error_response(e),
@@ -187,11 +254,26 @@ struct UpsertRecordResp {
     commit_version: u64,
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "upsert_record",
+    skip_all,
+    fields(space = %space, table = %table, op = "upsert_record"),
+
+
+)]
 async fn upsert_record(
     State(state): State<Arc<AppState>>,
     Path((space, table)): Path<(String, String)>,
     Json(req): Json<UpsertRecordReq>,
 ) -> Response {
+    let _timed = Timed::new(
+        &state.metrics.txn_commit_duration,
+        vec![
+            KeyValue::new("space", space.clone()),
+            KeyValue::new("table", table.clone()),
+        ],
+    );
     let space_in = space.clone();
     let table_in = table.clone();
     let result: XtableResult<(WriteOutcome, u64)> = async {
@@ -213,6 +295,13 @@ async fn upsert_record(
         Ok((outcome, commit))
     }
     .await;
+    state.metrics.txn_commit_total.add(
+        1,
+        &[KeyValue::new(
+            "outcome",
+            if result.is_ok() { "ok" } else { "err" },
+        )],
+    );
     match result {
         Ok((o, c)) => (
             StatusCode::CREATED,
@@ -223,7 +312,7 @@ async fn upsert_record(
                 commit_version: c,
             }),
         )
-            .into_response(),
+        .into_response(),
         Err(e) => error_response(e),
     }
 }
@@ -233,6 +322,19 @@ struct GetRecordQuery {
     snapshot: Option<String>,
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "get_record",
+    skip_all,
+    fields(
+        space = %space,
+        table = %table,
+        record_id = %record_id,
+        op = "get_record"
+    ),
+
+
+)]
 async fn get_record(
     State(state): State<Arc<AppState>>,
     Path((space, table, record_id)): Path<(String, String, String)>,
@@ -260,16 +362,37 @@ async fn get_record(
                 "deleted": r.deleted,
             })),
         )
-            .into_response(),
+        .into_response(),
         Ok(None) => not_found(),
         Err(e) => error_response(e),
     }
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "delete_record",
+    skip_all,
+    fields(
+        space = %space,
+        table = %table,
+        record_id = %record_id,
+        op = "delete_record"
+    ),
+
+
+)]
 async fn delete_record(
     State(state): State<Arc<AppState>>,
     Path((space, table, record_id)): Path<(String, String, String)>,
 ) -> Response {
+    let _timed = Timed::new(
+        &state.metrics.txn_commit_duration,
+        vec![
+            KeyValue::new("space", space.clone()),
+            KeyValue::new("table", table.clone()),
+            KeyValue::new("record_id", record_id.clone()),
+        ],
+    );
     let space_in = space.clone();
     let table_in = table.clone();
     let record_in = record_id.clone();
@@ -283,12 +406,19 @@ async fn delete_record(
         Ok(cv)
     }
     .await;
+    state.metrics.txn_commit_total.add(
+        1,
+        &[KeyValue::new(
+            "outcome",
+            if result.is_ok() { "ok" } else { "err" },
+        )],
+    );
     match result {
         Ok(cv) => (
             StatusCode::OK,
             Json(json!({ "deleted": true, "commit_version": cv })),
         )
-            .into_response(),
+        .into_response(),
         Err(e) => error_response(e),
     }
 }
@@ -305,6 +435,14 @@ struct QueryParams {
     filter_value: Option<String>,
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "query_records",
+    skip_all,
+    fields(space = %space, table = %table, op = "query_records"),
+
+
+)]
 async fn query_records(
     State(state): State<Arc<AppState>>,
     Path((space, table)): Path<(String, String)>,
@@ -356,7 +494,7 @@ async fn query_records(
                 })).collect::<Vec<_>>(),
             })),
         )
-            .into_response(),
+        .into_response(),
         Err(e) => error_response(e),
     }
 }
@@ -389,6 +527,14 @@ struct DiffQuery {
     s2: String,
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "diff_records",
+    skip_all,
+    fields(space = %space, table = %table, op = "diff_records"),
+
+
+)]
 async fn diff_records(
     State(state): State<Arc<AppState>>,
     Path((space, table)): Path<(String, String)>,
@@ -419,14 +565,20 @@ async fn diff_records(
                 })).collect::<Vec<_>>(),
             })),
         )
-            .into_response(),
+        .into_response(),
         Err(e) => error_response(e),
     }
 }
 
-async fn begin_structured_txn(
-    State(state): State<Arc<AppState>>,
-) -> Response {
+#[tracing::instrument(
+    level = "info",
+    name = "begin_structured_txn",
+    skip_all,
+    fields(op = "begin_structured_txn"),
+
+
+)]
+async fn begin_structured_txn(State(state): State<Arc<AppState>>) -> Response {
     match state.structured.begin_txn().await {
         Ok(t) => (
             StatusCode::CREATED,
@@ -435,11 +587,19 @@ async fn begin_structured_txn(
                 "snapshot_version": t.snapshot_version,
             })),
         )
-            .into_response(),
+        .into_response(),
         Err(e) => error_response(e),
     }
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "space_snapshot",
+    skip_all,
+    fields(space = %space, op = "space_snapshot"),
+
+
+)]
 async fn space_snapshot(
     State(state): State<Arc<AppState>>,
     Path(space): Path<String>,
@@ -452,7 +612,7 @@ async fn space_snapshot(
             "snapshot_version": snap,
         })),
     )
-        .into_response()
+    .into_response()
 }
 
 fn error_response(e: XtableError) -> Response {
@@ -466,7 +626,7 @@ fn error_response(e: XtableError) -> Response {
             "code": e.s3_code(),
         })),
     )
-        .into_response()
+    .into_response()
 }
 
 fn not_found() -> Response {

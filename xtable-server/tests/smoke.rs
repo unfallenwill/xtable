@@ -37,7 +37,13 @@ async fn build_app() -> (Router, TempDir) {
         }
         .into_entry(),
     );
-    let state = AppState::new(cfg, store, backend, creds);
+    let state = AppState::new(
+        cfg,
+        store,
+        backend,
+        creds,
+        xtable_telemetry::metrics::Metrics::default(),
+    );
     let app = xtable_server::structured::router().with_state(Arc::new(state));
     (app, tmp)
 }

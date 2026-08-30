@@ -31,7 +31,7 @@ async fn test_app() -> (axum::Router, TempDir) {
         secret_access_key: "test".into(),
     }.into_entry());
 
-    let state = AppState::new(cfg, store, backend, creds);
+    let state = AppState::new(cfg, store, backend, creds, xtable_telemetry::metrics::Metrics::default());
     let app = xtable_server::structured::router().with_state(Arc::new(state));
     (app, tmp)
 }
