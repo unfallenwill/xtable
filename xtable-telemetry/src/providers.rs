@@ -6,7 +6,8 @@
 use std::time::Duration;
 
 use anyhow::Context;
-use opentelemetry_otlp::{MetricExporter, SpanExporter, WithExportConfig};
+use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
+use opentelemetry_sdk::logs::LoggerProvider as SdkLoggerProvider;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::trace::{BatchConfigBuilder, BatchSpanProcessor, TracerProvider as SdkTracerProvider};
 use opentelemetry_sdk::Resource;
@@ -69,6 +70,29 @@ pub fn build_meter_provider(
         .build())
 }
 
+/// Build an OTLP `SdkLoggerProvider` that the tracing-opentelemetry bridge can
+/// consume. The appender layer (`OpenTelemetryTracingBridge`) is wired in later
+/// from `init.rs`; this factory only stands up the provider.
+pub fn install_log_appender(
+    cfg: &TelemetryConfig,
+    resource: Resource,
+) -> anyhow::Result<SdkLoggerProvider> {
+    let endpoint = cfg
+        .endpoint
+        .as_deref()
+        .context("endpoint missing — telemetry is disabled")?;
+
+    let exporter = build_log_exporter(cfg, endpoint)?;
+
+    let provider = SdkLoggerProvider::builder()
+        .with_resource(resource)
+        .with_simple_exporter(exporter)
+        .build();
+    Ok(provider)
+}
+
+// --- exporter helpers -------------------------------------------------------
+
 fn build_span_exporter(cfg: &TelemetryConfig, endpoint: &str) -> anyhow::Result<SpanExporter> {
     match cfg.protocol {
         OtlpProtocol::Grpc => SpanExporter::builder()
@@ -100,5 +124,22 @@ fn build_metric_exporter(cfg: &TelemetryConfig, endpoint: &str) -> anyhow::Resul
             .with_timeout(Duration::from_secs(5))
             .build()
             .map_err(|e| anyhow::anyhow!("OTLP metric exporter build: {e}")),
+    }
+}
+
+fn build_log_exporter(cfg: &TelemetryConfig, endpoint: &str) -> anyhow::Result<LogExporter> {
+    match cfg.protocol {
+        OtlpProtocol::Grpc => LogExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint)
+            .with_timeout(Duration::from_secs(5))
+            .build()
+            .map_err(|e| anyhow::anyhow!("OTLP log exporter build: {e}")),
+        OtlpProtocol::HttpProtobuf => LogExporter::builder()
+            .with_http()
+            .with_endpoint(endpoint)
+            .with_timeout(Duration::from_secs(5))
+            .build()
+            .map_err(|e| anyhow::anyhow!("OTLP log exporter build: {e}")),
     }
 }
