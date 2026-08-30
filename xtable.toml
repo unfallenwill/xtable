@@ -37,10 +37,13 @@ redb_dir = "/var/lib/xtable/redb"
 staged_body_spill_dir = "/var/lib/xtable/staged"
 max_staged_bytes = 109951162777600   # 100 GiB
 
-[observability]
-otlp_endpoint = ""
-metrics_listen = "127.0.0.1:9090"
-
+# Observability / OpenTelemetry is opt-in: telemetry is enabled iff
+# `OTEL_EXPORTER_OTLP_ENDPOINT` is set in the environment (or
+# `service_name` is overridden via TOML). Without an OTLP endpoint
+# the subscriber stays in stdout-only mode and metric recordings
+# go to the no-op fallback. Uncomment and customise the block below
+# to ship to a collector; otherwise omit it entirely.
+#
 # [observability]
 # service_name = "xtable"
 # environment = "production"
