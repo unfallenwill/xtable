@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use chrono::Utc;
 use futures_util::stream::{FuturesUnordered, StreamExt};
@@ -32,6 +32,9 @@ use xtable_storage::{
     BlobRecord, LocalStore, MemEntry, MemTableSet, RecordValue, TxnStateRecord, VersionRecord,
     WalRecord, WriteSetEntry,
 };
+use xtable_telemetry::metrics::Metrics;
+use xtable_telemetry::timed::Timed;
+use xtable_telemetry::KeyValue;
 
 use crate::error::TxnError;
 use crate::si_lock_manager::SiLockManager;
@@ -66,6 +69,16 @@ pub struct CommitEvent {
 /// (the chain is already published). Implementation MUST be fast and
 /// non-blocking on IO.
 pub type PostCommitHook = Arc<dyn Fn(&CommitEvent) + Send + Sync>;
+
+/// Lazily-initialised `Metrics` handles bound to the process-wide global
+/// `Meter`. Constructed on first access; subsequent calls reuse the same
+/// instruments. `xtable-telemetry::init()` must have been called before
+/// the first metric is recorded in production, otherwise the recordings
+/// go to the no-op default OTel provider.
+fn metrics() -> &'static Metrics {
+    static METRICS: OnceLock<Metrics> = OnceLock::new();
+    METRICS.get_or_init(Metrics::default)
+}
 
 /// Transaction coordinator.
 #[derive(Clone)]
@@ -175,8 +188,17 @@ impl TxnCoordinator {
     }
 
     /// Begin a new transaction.
+    #[tracing::instrument(
+        level = "info",
+        name = "txn.begin",
+        skip_all,
+        fields(txn.id = tracing::field::Empty, op = "begin"),
+        err,
+    )]
     pub async fn begin(&self, idempotency_key: Option<String>) -> XtableResult<String> {
+        let _timed = Timed::new(&metrics().txn_begin_duration, vec![KeyValue::new("op", "begin")]);
         let txn_id = Self::next_txn_id();
+        tracing::Span::current().record("txn.id", tracing::field::display(&txn_id));
         let snapshot_version = self.store.current_global_version()?;
         let now_ms = Utc::now().timestamp_millis();
         let rec = TxnStateRecord::new_active(snapshot_version, idempotency_key.clone(), now_ms);
@@ -193,6 +215,7 @@ impl TxnCoordinator {
             idempotency_key,
         })?;
         debug!(txn = %txn_id, version = snapshot_version, "BeginTxn");
+        metrics().txn_begin_total.add(1, &[KeyValue::new("outcome", "ok")]);
         Ok(txn_id)
     }
 
@@ -298,12 +321,27 @@ impl TxnCoordinator {
 
     /// Commit a transaction. PR #3 removed the OCC validate phase; PR #4
     /// wires the SI lock manager + MemTable publish into `commit_inner`.
+    #[tracing::instrument(
+        level = "info",
+        name = "txn.commit",
+        skip_all,
+        fields(txn.id = %txn_id, op = "commit"),
+        err,
+    )]
     pub async fn commit(&self, txn_id: &str) -> XtableResult<CommitOutcome> {
-        // PR #3: `commit_lock` removed. The SI lock manager's interior
-        // mutex provides equivalent serialization for the per-txn
-        // critical section. Cross-txn serialization on the same key is
-        // handled by `append_chain_entries_bulk`'s monotonicity check.
-        self.commit_inner(txn_id).await
+        let m = metrics();
+        m.txn_commit_active.add(1, &[KeyValue::new("op", "commit")]);
+        let _timed = Timed::new(&m.txn_commit_duration, vec![KeyValue::new("op", "commit")]);
+        let result = self.commit_inner(txn_id).await;
+        m.txn_commit_active.add(-1, &[KeyValue::new("op", "commit")]);
+        m.txn_commit_total.add(
+            1,
+            &[KeyValue::new(
+                "outcome",
+                if result.is_ok() { "ok" } else { "err" },
+            )],
+        );
+        result
     }
 
     async fn commit_inner(&self, txn_id: &str) -> XtableResult<CommitOutcome> {
@@ -332,6 +370,7 @@ impl TxnCoordinator {
         // PR #4: Cahill cycle detection. Reads in-edges and out-edges on
         // this txn; if any peer appears in both, abort.
         if let Some(peer) = self.lock_manager.find_dangerous_structure(txn_id) {
+            metrics().txn_ssi_conflict_total.add(1, &[]);
             self.store.append_wal(&WalRecord::Aborted {
                 txn_id: txn_id.to_string(),
                 reason: format!("Cahill cycle with {}", peer),
@@ -648,7 +687,28 @@ self.store.append_chain_entries_bulk(&entries)?;
     }
 
     /// Abort a transaction. Drop staged bodies, mark aborted in WAL.
+    #[tracing::instrument(
+        level = "info",
+        name = "txn.abort",
+        skip_all,
+        fields(txn.id = %txn_id, op = "abort"),
+        err,
+    )]
     pub async fn abort(&self, txn_id: &str) -> XtableResult<()> {
+        let m = metrics();
+        let _timed = Timed::new(&m.txn_abort_duration, vec![KeyValue::new("op", "abort")]);
+        let result = self.abort_inner(txn_id).await;
+        m.txn_abort_total.add(
+            1,
+            &[KeyValue::new(
+                "outcome",
+                if result.is_ok() { "ok" } else { "err" },
+            )],
+        );
+        result
+    }
+
+    async fn abort_inner(&self, txn_id: &str) -> XtableResult<()> {
         let mut txn = match self.store.get_txn_state(txn_id)? {
             Some(t) => t,
             None => return Err(TxnError::UnknownTxn(txn_id.to_string()).into()),

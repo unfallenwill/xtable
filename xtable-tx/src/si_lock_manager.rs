@@ -33,6 +33,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use tracing::instrument;
 
 use xtable_core::XtableResult;
 use xtable_storage::{
@@ -81,6 +82,7 @@ impl SiLockManager {
 
     /// Begin tracking a txn. Returns `Ok(())` if the txn is fresh,
     /// error if it already exists.
+    #[instrument(level = "debug", skip_all, fields(txn.id = %txn_id), err)]
     pub fn begin_txn(self: &Arc<Self>, txn_id: &str, snapshot_version: u64) -> XtableResult<()> {
         let mut g = self.inner.lock();
         if g.by_txn.contains_key(txn_id) {
@@ -103,6 +105,7 @@ impl SiLockManager {
     /// Record a read of `key` at `version_observed`. Adds in-edges from
     /// any recently-committed writer of this key whose
     /// `committed_version > version_observed`.
+    #[instrument(level = "debug", skip_all, fields(txn.id = %txn_id, key = %key))]
     pub fn register_read(
         self: &Arc<Self>,
         txn_id: &str,
@@ -149,6 +152,7 @@ impl SiLockManager {
     /// Record an intent to write `key` at `version_to_write`. Adds
     /// in-edges from any active reader of this key (those readers will
     /// also gain the mirror out-edge). Updates the writers_of index.
+    #[instrument(level = "debug", skip_all, fields(txn.id = %txn_id, key = %key))]
     pub fn register_write(
         self: &Arc<Self>,
         txn_id: &str,
@@ -214,6 +218,7 @@ impl SiLockManager {
     /// conflict on their own commit pass — simple, correct, no tie-break
     /// needed. The current coordinator caller treats any Some(_) as a
     /// Conflict abort.
+    #[instrument(level = "debug", skip_all, fields(txn.id = %txn_id))]
     pub fn find_dangerous_structure(self: &Arc<Self>, txn_id: &str) -> Option<String> {
         let g = self.inner.lock();
         let me = g.by_txn.get(txn_id)?;
@@ -239,6 +244,7 @@ impl SiLockManager {
     /// edges remain in `by_txn` for the rolling window; the writers_of
     /// index is updated so future register_read calls see this txn as a
     /// recent writer.
+    #[instrument(level = "debug", skip_all, fields(txn.id = %txn_id, commit_version))]
     pub fn mark_committed(self: &Arc<Self>, txn_id: &str, commit_version: u64) {
         // Collect out-edges first.
         let out_edges_snapshot: Vec<(String, String)> = {
@@ -314,6 +320,7 @@ impl SiLockManager {
     /// including dangling in-edges that other active txns held pointing at
     /// this one. Without this cleanup, find_dangerous_structure on those
     /// peers would return phantom cycles against the aborted txn.
+    #[instrument(level = "debug", skip_all, fields(txn.id = %txn_id))]
     pub fn mark_aborted(self: &Arc<Self>, txn_id: &str) {
         let mut g = self.inner.lock();
         // Drop this txn from `by_txn` first; keep the txn_id around so we

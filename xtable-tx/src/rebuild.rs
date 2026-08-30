@@ -12,12 +12,22 @@
 //! record at all.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use chrono::Utc;
 use tracing::{info, warn};
 
 use xtable_core::ObjectKey;
 use xtable_storage::{LocalStore, VersionEntry, VersionRecord};
+use xtable_telemetry::metrics::Metrics;
+use xtable_telemetry::timed::Timed;
+use xtable_telemetry::KeyValue;
+
+/// Lazily-initialised `Metrics` bound to the global OTel meter.
+fn metrics() -> &'static Metrics {
+    static METRICS: OnceLock<Metrics> = OnceLock::new();
+    METRICS.get_or_init(Metrics::default)
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RebuildReport {
@@ -27,10 +37,20 @@ pub struct RebuildReport {
 }
 
 /// Run cold rebuild into the provided LocalStore.
+#[tracing::instrument(
+    level = "info",
+    name = "tx.rebuild",
+    skip_all,
+    err,
+)]
 pub async fn rebuild(
     store: &LocalStore,
     backend: &xtable_backend::BackendClient,
 ) -> Result<RebuildReport, xtable_core::XtableError> {
+    let _timed = Timed::new(
+        &metrics().rebuild_cold_duration,
+        vec![KeyValue::new("op", "rebuild")],
+    );
     info!("starting cold rebuild from backend S3");
 
     // V14 fix: backend unreachability is now a fatal error. Returning

@@ -9,7 +9,9 @@ license.workspace = true
 xtable-core = { path = "../xtable-core" }
 xtable-storage = { path = "../xtable-storage" }
 xtable-backend = { path = "../xtable-backend" }
+xtable-telemetry = { path = "../xtable-telemetry" }
 
+opentelemetry = { workspace = true }
 redb = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }

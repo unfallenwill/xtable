@@ -1,11 +1,22 @@
 //! Periodic GC: abort stale active transactions, drop stale staged blobs,
 //! and prune MVCC version chains below the minimum active snapshot.
 
+use std::sync::OnceLock;
+
 use chrono::Utc;
 use redb::ReadableTable;
 use xtable_core::headers::TxnStatus;
 use xtable_core::XtableError;
 use xtable_storage::LocalStore;
+use xtable_telemetry::metrics::Metrics;
+use xtable_telemetry::timed::Timed;
+use xtable_telemetry::KeyValue;
+
+/// Lazily-initialised `Metrics` bound to the global OTel meter.
+fn metrics() -> &'static Metrics {
+    static METRICS: OnceLock<Metrics> = OnceLock::new();
+    METRICS.get_or_init(Metrics::default)
+}
 
 /// Sweep all active transactions older than `timeout_secs`. Returns the
 /// number aborted.
@@ -75,8 +86,11 @@ pub fn gc_version_chains(store: &LocalStore) -> Result<(usize, usize), XtableErr
 
 /// Run a single combined sweep: stale txns + chain GC.
 pub fn sweep_all(store: &LocalStore, txn_timeout_secs: i64) -> Result<CombinedSweep, XtableError> {
+    let m = metrics();
+    let _timed = Timed::new(&m.gc_sweep_duration, vec![KeyValue::new("op", "sweep_all")]);
     let aborted = sweep_stale_txns(store, txn_timeout_secs)?;
     let (chains_pruned, entries_removed) = gc_version_chains(store)?;
+    m.gc_entries_removed.add(entries_removed as u64, &[]);
     Ok(CombinedSweep {
         aborted_txns: aborted,
         chains_pruned,
