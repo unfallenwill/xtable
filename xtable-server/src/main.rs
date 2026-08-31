@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
 
     {
         // Crash WAL replay.
-        match xtable_tx::recovery::recover(&store, &backend).await {
+        match xtable_tx::recovery::recover(&store).await {
             Ok(report) => info!(?report, "recovery complete"),
             Err(e) => warn!(err = %e, "recovery failed; attempting cold rebuild"),
         }

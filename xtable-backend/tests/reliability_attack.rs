@@ -277,7 +277,7 @@ async fn poc2_recovery_deletes_published_commit() {
     store.append_chain_entry("k", &VersionEntry::new(1, "e1".into(), "k".into(), txn.clone(), 7)).unwrap();
     backend.put_object(&ObjectKey::new("k"), b"payload".to_vec(), None, HashMap::new()).await.unwrap();
 
-    recovery::recover(&store, &*backend).await.unwrap();
+    recovery::recover(&store).await.unwrap();
 
     // The chain entry is already published (atomicity point crossed), so
     // recovery must complete the commit: keep the backend object, keep the

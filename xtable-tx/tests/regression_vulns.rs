@@ -97,8 +97,7 @@ async fn unit_v2_recovery_preserves_published_chain() {
     state.alloc_versions = vec![("k".into(), 1)];
     store.put_txn_state(txn_id, &state).unwrap();
 
-    let backend = xtable_backend::BackendClient::dummy_for_test_async().await.unwrap();
-    let report = xtable_tx::recovery::recover(&store, &backend).await.unwrap();
+    let report = xtable_tx::recovery::recover(&store).await.unwrap();
     // V2 fix: chain-won-WAL-race should be reported, NOT a partial abort.
     assert!(
         report.chain_won_wal_race >= 1,

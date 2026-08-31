@@ -12,16 +12,17 @@
 //!   version entry → treat as committed (chain won the race with WAL).
 //!   Write the missing WAL `Committed` and `CommitResult`. Do NOT delete.
 //! - If WAL ends with `Committing` and the chain does NOT have our txn's
-//!   entry → genuinely incomplete; some uploads may have succeeded. Compensate
-//!   (with V3 protection: only delete keys whose chain latest is still our
-//!   alloc_version).
+//!   entry → genuinely incomplete; mark aborted. Chunk-only refactor
+//!   (fixup after final review) removed the V3 compensating-delete loop:
+//!   structured records ride chunks, so there is no per-record S3 PUT to
+//!   delete. The chunk pipeline reconciles on the next flush.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use tracing::{info, warn};
 
 use xtable_core::headers::TxnStatus;
-use xtable_core::{ObjectKey, XtableResult};
+use xtable_core::XtableResult;
 use xtable_storage::{LocalStore, WalRecord};
 use xtable_telemetry::metrics::Metrics;
 use xtable_telemetry::timed::Timed;
@@ -43,12 +44,12 @@ pub struct RecoveryReport {
     pub partial_uploads_aborted: usize,
 }
 
-pub async fn recover(store: &LocalStore, backend: &xtable_backend::BackendClient) -> XtableResult<RecoveryReport> {
+pub async fn recover(store: &LocalStore) -> XtableResult<RecoveryReport> {
     let _timed = Timed::new(
         &metrics().recovery_replay_duration,
         vec![KeyValue::new("op", "recover")],
     );
-    recover_inner(store, backend).await
+    recover_inner(store).await
 }
 
 #[tracing::instrument(
@@ -57,10 +58,7 @@ pub async fn recover(store: &LocalStore, backend: &xtable_backend::BackendClient
     skip_all,
     err,
 )]
-async fn recover_inner(
-    store: &LocalStore,
-    backend: &xtable_backend::BackendClient,
-) -> XtableResult<RecoveryReport> {
+async fn recover_inner(store: &LocalStore) -> XtableResult<RecoveryReport> {
     let log = store.iter_wal()?;
     let mut last_status: HashMap<String, TxnStatus> = HashMap::new();
     let mut last_uploaded: HashMap<String, Vec<String>> = HashMap::new();
@@ -138,27 +136,22 @@ async fn recover_inner(
                         }
                     }
                     if !pending_uploads.is_empty() {
-                        // Some uploads definitely didn't happen — abort those.
+                        // Chunk-only world (fixup after final review):
+                        // there are no per-record S3 PUTs to compensate
+                        // anymore — structured records ride chunks, so a
+                        // backend.delete_object here would target a key
+                        // that was never written. We keep the
+                        // abort-and-counter path as a defensive marker
+                        // for any future per-record write that might be
+                        // reintroduced; the V2/V3 delete loop is removed
+                        // because it would lie to readers and is
+                        // operationally a no-op (S3/MockS3 treat delete
+                        // of missing keys as no-op).
                         warn!(
                             txn = %txn_id,
                             pending = ?pending_uploads,
-                            "partial CommitTxn with chain-not-published; compensating"
+                            "partial CommitTxn with chain-not-published; aborting without compensation"
                         );
-                        for key in &pending_uploads {
-                            let alloc_v = alloc_vers
-                                .iter()
-                                .find(|(k, _)| k == key)
-                                .map(|(_, v)| *v)
-                                .unwrap_or(0);
-                            let current_latest = store
-                                .read_chain(key)
-                                .map(|c| c.latest_commit_version())
-                                .unwrap_or(0);
-                            // V3 protection: only delete if still our alloc.
-                            if current_latest == alloc_v {
-                                let _ = backend.delete_object(&ObjectKey::new(key)).await;
-                            }
-                        }
                         abort_txn_no_uploads(store, &txn_id)?;
                         report.partial_uploads_aborted += 1;
                     } else if chain_published_count > 0 {
@@ -248,19 +241,16 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    async fn make() -> (LocalStore, xtable_backend::BackendClient, TempDir) {
+    async fn make() -> (LocalStore, TempDir) {
         let tmp = TempDir::new().unwrap();
         let store = LocalStore::open_path(&tmp.path().join("xt.redb")).unwrap();
-        let backend = xtable_backend::BackendClient::dummy_for_test_async()
-            .await
-            .unwrap();
-        (store, backend, tmp)
+        (store, tmp)
     }
 
     #[tokio::test]
     async fn recover_no_wal_is_noop() {
-        let (store, backend, _tmp) = make().await;
-        let r = recover(&store, &backend).await.unwrap();
+        let (store, _tmp) = make().await;
+        let r = recover(&store).await.unwrap();
         assert_eq!(r.already_committed, 0);
         assert_eq!(r.chain_won_wal_race, 0);
         assert_eq!(r.partial_uploads_aborted, 0);
@@ -268,7 +258,7 @@ mod tests {
 
     #[tokio::test]
     async fn recover_marks_in_progress_txn_as_aborted() {
-        let (store, backend, _tmp) = make().await;
+        let (store, _tmp) = make().await;
         let txn_id = "T1";
         store
             .append_wal(&WalRecord::Begin {
@@ -280,7 +270,7 @@ mod tests {
         let mut r = xtable_storage::TxnStateRecord::new_active(0, None, 0);
         r.status = TxnStatus::Active;
         store.put_txn_state(txn_id, &r).unwrap();
-        let rep = recover(&store, &backend).await.unwrap();
+        let rep = recover(&store).await.unwrap();
         assert_eq!(rep.already_committed, 0);
         let post = store.get_txn_state(txn_id).unwrap().unwrap();
         assert_eq!(post.status, TxnStatus::Aborted);
