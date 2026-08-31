@@ -373,6 +373,42 @@ impl MemTableSet {
         Ok(())
     }
 
+    /// Non-blocking age/size rotation driven by the flush loop's periodic
+    /// tick. Returns true if a rotation actually happened. Skips the
+    /// rotation if a concurrent commit is currently holding the active
+    /// read lock — that commit will itself trigger rotation when it
+    /// sees the size/age threshold cross (see `put_invisible`).
+    ///
+    /// Critical: this method must not block. A blocking write-lock wait
+    /// inside an async task starves the tokio runtime thread and freezes
+    /// the entire server (the server is single-worker for HTTP).
+    pub fn try_rotate_active(&self) -> bool {
+        if !self.should_rotate_active() {
+            return false;
+        }
+        let current = self.active.read().clone();
+        let mut w = match self.active.try_write() {
+            Some(g) => g,
+            None => return false,
+        };
+        if !Arc::ptr_eq(&*w, &current) {
+            return false;
+        }
+        let new_id = current.id + 1;
+        let new_active = MemTable::new(new_id);
+        let old = std::mem::replace(&mut *w, new_active);
+        drop(w);
+        self.flushing.lock().push(old);
+        self.flush_notify.notify_one();
+        true
+    }
+
+    /// True if the active memtable's size or age has crossed the
+    /// `FlushPolicy` threshold.
+    pub fn should_rotate_active(&self) -> bool {
+        self.active.read().should_flush(&self.policy)
+    }
+
     /// Take all current immutables for the flush task.
     pub async fn take_immutables(&self) -> Vec<Arc<MemTable>> {
         // parking_lot::Mutex is sync; contention is brief (maybe_rotate

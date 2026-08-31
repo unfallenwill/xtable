@@ -50,6 +50,13 @@ pub const DEFAULT_FLUSH_CONCURRENCY: usize = 4;
 /// they arrive. Each immutable is flushed in `flush_one`. Caller is
 /// responsible for spawning the loop (typically once at server start).
 ///
+/// A 1s wall-clock tick runs `try_rotate_active` alongside the
+/// `flush_notify` signal so that *idle* memtables (no incoming
+/// commits) still age out and get flushed. `try_rotate_active` is
+/// non-blocking — it only acts when it can grab the active write lock
+/// without waiting — so the tick is safe to run inside the async
+/// runtime even if a commit is concurrently holding the read lock.
+///
 /// NOTE: This function is intentionally NOT `#[tracing::instrument]`-ed —
 /// it is a long-lived task whose single span would live the entire
 /// process lifetime, leaking per-span metadata into the tracing
@@ -62,9 +69,14 @@ pub async fn flush_loop(
     store: crate::store::LocalStore,
     backend: Arc<xtable_backend::BackendClient>,
 ) -> XtableResult<()> {
+    let tick = std::time::Duration::from_secs(1);
     loop {
-        // Wait for at least one immutable.
-        memtables.flush_notify.notified().await;
+        tokio::select! {
+            _ = memtables.flush_notify.notified() => {}
+            _ = tokio::time::sleep(tick) => {
+                memtables.try_rotate_active();
+            }
+        }
         let immutables = memtables.take_immutables().await;
         for mt in immutables {
             let r = flush_one(&mt, &store, backend.clone()).await;
