@@ -290,7 +290,10 @@ async fn e2e_delete_object() {
 
 #[tokio::test]
 async fn e2e_coordinator_commit_writes_object_to_backend() {
-    let (endpoint, _mock) = mock_s3_server().await;
+    // Spec §5.1: commit no longer issues per-record PUTs. The body is
+    // published to the MemTable (chunk flush uploads as a chunk later).
+    // The chain append + WAL Committed are the durability boundary.
+    let (endpoint, mock) = mock_s3_server().await;
     let backend = build_backend(&endpoint).await;
     let tmp = tempfile::TempDir::new().unwrap();
     let store = LocalStore::open_path(&tmp.path().join("xt.redb")).unwrap();
@@ -313,14 +316,26 @@ async fn e2e_coordinator_commit_writes_object_to_backend() {
     let out = coord.commit(&txn).await.unwrap();
     assert!(out.commit_version > 0);
 
+    // Backend MUST NOT have the object: spec §5.1 removed the per-record PUT.
     let res = coord.backend().get_object(&ObjectKey::new("k")).await;
-    assert!(res.is_ok(), "object should be uploaded: {:?}", res.err());
-    let bytes = res.unwrap().bytes;
-    assert_eq!(bytes, b"committed-value");
+    assert!(res.is_err(),
+        "per-record PUT was removed in spec §5.1; backend must not have `k`: got {:?}",
+        res.ok().map(|r| r.bytes));
+    assert!(!mock.snapshot_keys().contains(&"k".to_string()),
+        "mock must not contain `k` after commit");
+
+    // The chain append — the durability boundary — must be present.
+    let chain = store.read_chain("k").unwrap();
+    assert_eq!(chain.entries.len(), 1,
+        "chain append is the durability boundary after spec §5.1");
+    assert_eq!(chain.entries[0].commit_version, out.commit_version);
 }
 
 #[tokio::test]
 async fn e2e_atomic_multi_object_all_or_nothing() {
+    // Spec §5.1: per-record PUTs are removed. Atomicity now comes from the
+    // chain append + WAL Committed, not from backend PUT. This test asserts
+    // the chain entries (atomicity boundary) instead of backend contents.
     let (endpoint, mock) = mock_s3_server().await;
     let backend = build_backend(&endpoint).await;
     let tmp = tempfile::TempDir::new().unwrap();
@@ -345,14 +360,22 @@ async fn e2e_atomic_multi_object_all_or_nothing() {
     }
     let _ = coord.commit(&txn).await.unwrap();
 
+    // Backend MUST be empty: per-record PUT was removed in spec §5.1.
     let snap = mock.snapshot_keys();
-    assert!(snap.contains(&"a".to_string()));
-    assert!(snap.contains(&"b".to_string()));
-    assert!(snap.contains(&"c".to_string()));
+    assert!(!snap.contains(&"a".to_string()),
+        "spec §5.1 removed per-record PUT; backend must be empty: saw {:?}", snap);
+    assert!(!snap.contains(&"b".to_string()));
+    assert!(!snap.contains(&"c".to_string()));
 
+    // Atomicity is preserved via the chain append + WAL Committed.
     let st = store.get_txn_state(&txn).unwrap().unwrap();
     let status_str = format!("{:?}", st.status);
     assert_eq!(status_str, "Committed");
+    for k in ["a", "b", "c"] {
+        let chain = store.read_chain(k).unwrap();
+        assert_eq!(chain.entries.len(), 1,
+            "chain entry must exist for {k} after commit (spec §5.1)");
+    }
 }
 
 #[tokio::test]

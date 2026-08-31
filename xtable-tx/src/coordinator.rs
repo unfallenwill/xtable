@@ -7,25 +7,25 @@
 //! 3. CommitTxn:
 //!    a. Cahill cycle detection (lock_manager.find_dangerous_structure)
 //!       → abort on dangerous structure (Conflict)
-//!    b. Upload all keys to backend S3 (single PUT or multipart)
+//!    b. (Spec §5.1 — per-record S3 PUT removed; chain append + WAL are the
+//!       durability boundary. The MemTable is the only writer of structured
+//!       data; the flush loop uploads it as a chunk later.)
 //!    c. Atomic redb write txn: append_chain_entries_bulk with
 //!       snapshot-conflict check (prevents lost-update) + memtable publish
 //!    d. WAL `Committed` + Mark committed on SI lock manager
 //!    e. Fire post-commit hooks (record_index update)
-//! 4. On any failure during upload, compensating-delete already-uploaded keys,
+//! 4. On any failure, mark aborted + return conflict / 503; no per-record
+//!    S3 state to roll back because nothing was PUT per-record.
 //!    WAL `Aborted`, return 409 / 503.
 
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
 use chrono::Utc;
-use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Semaphore;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
-use xtable_backend::{BackendClient, BackendError};
+use xtable_backend::BackendClient;
 use xtable_core::headers::TxnStatus;
 use xtable_core::{ObjectKey, TxnId, Version, XtableError, XtableResult};
 use xtable_storage::{
@@ -86,8 +86,6 @@ pub struct TxnCoordinator {
     store: Arc<LocalStore>,
     backend: Arc<BackendClient>,
     spill_dir: Arc<std::path::PathBuf>,
-    /// Optional concurrency limit for parallel backend uploads.
-    upload_concurrency: Arc<Semaphore>,
     /// PR #4: Cahill SSI lock manager. Tracks per-txn SIRead/SIWrite locks
     /// and rw-antidependency edges; commit-time cycle detection aborts
     /// txns that participate in dangerous structures.
@@ -110,14 +108,13 @@ impl TxnCoordinator {
         store: Arc<LocalStore>,
         backend: Arc<BackendClient>,
         spill_dir: std::path::PathBuf,
-        upload_concurrency: usize,
+        _upload_concurrency: usize,
     ) -> Self {
         std::fs::create_dir_all(&spill_dir).ok();
         Self {
             store,
             backend,
             spill_dir: Arc::new(spill_dir),
-            upload_concurrency: Arc::new(Semaphore::new(upload_concurrency.max(1))),
             // PR #4: default SI lock manager + memtable set.
             lock_manager: SiLockManager::new(),
             memtable_set: MemTableSet::new(
@@ -134,7 +131,7 @@ impl TxnCoordinator {
         store: Arc<LocalStore>,
         backend: Arc<BackendClient>,
         spill_dir: std::path::PathBuf,
-        upload_concurrency: usize,
+        _upload_concurrency: usize,
         lock_manager: Arc<SiLockManager>,
         memtable_set: Arc<MemTableSet>,
     ) -> Self {
@@ -143,7 +140,6 @@ impl TxnCoordinator {
             store,
             backend,
             spill_dir: Arc::new(spill_dir),
-            upload_concurrency: Arc::new(Semaphore::new(upload_concurrency.max(1))),
             lock_manager,
             memtable_set,
             post_commit_hooks: Arc::new(std::sync::RwLock::new(Vec::new())),
@@ -433,98 +429,20 @@ impl TxnCoordinator {
             upload_keys: alloc_versions.iter().map(|(k, _)| k.clone()).collect(),
         })?;
 
-        // 5. Upload all bodies to a per-txn staging path in S3, NOT to the
-        // final key paths. This is the V3 fix: if any upload fails, we can
-        // abort cleanly by deleting staging copies without ever having
-        // overwritten the live (T0) data. On full success we promote each
-        // staging object to its final key.
-        let upload_keys = Arc::new(sorted_keys);
-        let staging_prefix = format!("xtable-txn-staging/{}/", txn_id);
-        let upload_results = self
-            .upload_all(txn_id, &write_entries, &alloc_versions, upload_keys.clone(), &staging_prefix)
-            .await;
-
-        let mut uploaded: Vec<String> = Vec::new();
-        let mut failed: Vec<(String, String)> = Vec::new();
-        for (key, res) in upload_results {
-            match res {
-                Ok(()) => uploaded.push(key),
-                Err(e) => failed.push((key, format!("{}", e))),
-            }
-        }
-
-        // Record committed-uploads list for recovery / compensation.
-        txn.uploaded_keys = uploaded.clone();
+        // 5. Spec §5.1: the per-record PUT to S3 is removed. Per-record
+        // bodies no longer leave through the backend on commit. The
+        // single writer of structured data is the MemTable (see step 9
+        // below); the flush loop encodes MemTable contents into a chunk
+        // and uploads it. The chain append + WAL Committed (step 8)
+        // remain the durability boundary — atomicity depends on them,
+        // not on per-record S3 PUT.
         txn.alloc_versions = alloc_versions.clone();
+        // No uploaded_keys — there are no per-record S3 uploads any more.
+        txn.uploaded_keys.clear();
         self.store.put_txn_state(txn_id, &txn)?;
 
-        // 6. If any uploads failed, abort cleanly: delete every staging
-        // copy we did manage to write, leave the live backend untouched,
-        // and never append the chain entry.
-        if !failed.is_empty() {
-            warn!(txn = %txn_id, failed_keys = ?failed, "uploads failed; cleaning up staging copies");
-            for (key, _alloc_v) in &alloc_versions {
-                if !uploaded.contains(key) {
-                    continue;
-                }
-                let staging_key = format!("{}{}", staging_prefix, key);
-                let _ = self.backend.delete_object(&ObjectKey::new(&staging_key)).await;
-            }
-            self.store.append_wal(&WalRecord::Aborted {
-                txn_id: txn_id.to_string(),
-                reason: format!("upload failures: {:?}", failed),
-            })?;
-            txn.status = TxnStatus::Aborted;
-            self.store.put_txn_state(txn_id, &txn)?;
-            return Err(XtableError::Backend(format!("txn {} aborted: upload failures", txn_id)));
-        }
-
-        // 6b. All staging uploads succeeded — promote each to its final
-        // key. For deleted=true entries, the staging delete now takes
-        // effect on the live key. For normal entries, we copy the staged
-        // body to the final key (preserving xtable metadata), then delete
-        // the staging copy.
-        for (key, alloc_v) in &alloc_versions {
-            let staging_key = format!("{}{}", staging_prefix, key);
-            let staging_obj = ObjectKey::new(&staging_key);
-            let final_obj = ObjectKey::new(key);
-            let write_entry = write_entries.iter().find(|(kk, _)| kk == key);
-            let is_deleted = write_entry.map(|(_, e)| e.deleted).unwrap_or(false);
-
-            if is_deleted {
-                // V10: actually delete the live key.
-                let _ = self.backend.delete_object(&final_obj).await;
-            } else {
-                match self.backend.get_object(&staging_obj).await {
-                    Ok(got) => {
-                        let mut meta = HashMap::new();
-                        meta.insert(
-                            "x-amz-meta-xtable-version".to_string(),
-                            alloc_v.to_string(),
-                        );
-                        meta.insert(
-                            "x-amz-meta-xtable-txn-id".to_string(),
-                            txn_id.to_string(),
-                        );
-                        let _ = self
-                            .backend
-                            .put_object(&final_obj, got.bytes, None, meta)
-                            .await;
-                    }
-                    Err(_) => {
-                        // We just uploaded this; if it's gone now the
-                        // backend is in trouble. Don't overwrite live
-                        // data speculatively.
-                        warn!(key = %key, "could not fetch staging body for promotion");
-                    }
-                }
-            }
-            // Clean up staging copy regardless.
-            let _ = self.backend.delete_object(&staging_obj).await;
-        }
-
-        // 7. V7 fix: WAL Committing already written above (before uploads).
-        // Below is the chain-publish + WAL Committed stage.
+        // 6/7. WAL Committing already written above. Below is the
+        // chain-publish + WAL Committed stage.
 
         // 8. MVCC: append new VersionEntry to each chain atomically.
         // Invariants satisfied here:
@@ -603,10 +521,13 @@ self.store.append_chain_entries_bulk(&entries)?;
         // background flush task encodes the immutable memtable into a
         // chunk and uploads to S3 (see `flush_loop`).
         //
-        // Memtable uses space="" / table="" for non-structured records.
-        // Structured records (which have a space/table) get the same
-        // empty pair here; the structured layer maintains its own index
-        // via post-commit hooks.
+        // Memtable publish. Spec §5.1: this is the only writer of
+        // structured data to the LSM layer. Per-record keys are parsed
+        // from the staged `backend_key` so chunk layout is keyed by the
+        // real (space, table). Records: `_xtable/{space}/{table}/{rid}`.
+        // Schemas (Task 4): `_xtable/{space}/_schema/{name}/v{N}.json`.
+        // Non-structured keys fall back to ("" , "" , key) so they stay
+        // isolated from the structured-data path.
         for (key, we) in &write_entries {
             let body = match &we.inline_body {
                 Some(b) => bytes::Bytes::copy_from_slice(b.as_slice()),
@@ -615,11 +536,13 @@ self.store.append_chain_entries_bulk(&entries)?;
                     None => bytes::Bytes::new(),
                 },
             };
+            let (space, table, record_id) = parse_record_key(key)
+                .unwrap_or_else(|| (String::new(), String::new(), key.clone()));
             let mem_key: xtable_storage::memtable::RecordKey =
-                (String::new(), String::new(), key.clone());
+                (space, table, record_id);
             let cv_atomic = Arc::new(std::sync::atomic::AtomicU64::new(commit_version));
             let mem_entry = MemEntry {
-                key: mem_key,
+                key: mem_key.clone(),
                 value: Arc::new(RecordValue { bytes: body }),
                 commit_version: cv_atomic,
                 txn_id: txn_id.to_string(),
@@ -632,11 +555,7 @@ self.store.append_chain_entries_bulk(&entries)?;
             };
             // Memtable write is best-effort — chain append is already durable.
             let _ = self.memtable_set.put_invisible(mem_entry);
-            self.memtable_set.publish(
-                &(String::new(), String::new(), key.clone()),
-                commit_version,
-                commit_version,
-            );
+            self.memtable_set.publish(&mem_key, commit_version, commit_version);
         }
 
         // PR #4: mark the txn as recently committed in the SI lock
@@ -771,94 +690,6 @@ self.store.append_chain_entries_bulk(&entries)?;
         Ok(None)
     }
 
-    /// Upload all staged writes to the backend S3 in parallel.
-    /// For `deleted=true` entries (V10 fix), call DeleteObject on the backend
-    /// instead of PutObject.
-    /// `key_prefix` (e.g. `"xtable-txn-staging/{txn_id}/"`) is prepended to
-    /// every S3 key so callers can stage writes to a side location and
-    /// promote them only after the whole txn is confirmed. Empty string
-    /// means "publish to final key path" (legacy behavior).
-    /// Returns per-key results for compensation on failure.
-    async fn upload_all(
-        &self,
-        txn_id: &str,
-        write_entries: &[(String, WriteSetEntry)],
-        alloc_versions: &[(String, u64)],
-        upload_keys: Arc<Vec<String>>,
-        key_prefix: &str,
-    ) -> Vec<(String, Result<(), BackendError>)> {
-        let mut futures: FuturesUnordered<Pin<Box<dyn std::future::Future<Output = (String, Result<(), BackendError>)> + Send>>> = FuturesUnordered::new();
-        for (key, entry) in write_entries {
-            let key_str = key.clone();
-            let alloc_v = alloc_versions.iter().find(|(k, _)| k == &key_str).map(|(_, v)| *v).unwrap_or(0);
-
-            let meta_map = entry.user_meta.iter().cloned().collect::<HashMap<_, _>>();
-            let backend = Arc::clone(&self.backend);
-            let permit_sem = Arc::clone(&self.upload_concurrency);
-            let key_for_task = key_str.clone();
-            let deleted = entry.deleted;
-            let txn_id_owned = txn_id.to_string();
-            let s3_key = format!("{}{}", key_prefix, key_for_task);
-
-            if deleted {
-                // V10: transactional delete → DeleteObject (NOT PutObject with empty body).
-                let fut = async move {
-                    let _permit = permit_sem.acquire_owned().await.expect("semaphore closed");
-                    let res = backend.delete_object(&ObjectKey::new(&s3_key)).await;
-                    (key_for_task, res.map(|_| ()))
-                };
-                futures.push(Box::pin(fut));
-                continue;
-            }
-
-            let body = if let Some(inline) = &entry.inline_body {
-                inline.clone()
-            } else if let Some(handle) = &entry.body_handle {
-                let rec = match self.store.get_blob(handle) {
-                    Ok(Some(r)) => r,
-                    _ => return vec![(key_str, Err(BackendError::Internal("blob missing".into())))],
-                };
-                match std::fs::read(&rec.path) {
-                    Ok(b) => b,
-                    Err(_) => return vec![(key_str, Err(BackendError::Internal("blob read fail".into())))],
-                }
-            } else {
-                // Should not happen — non-deleted entries must have a body.
-                Vec::new()
-            };
-
-            let fut = async move {
-                let _permit = permit_sem.acquire_owned().await.expect("semaphore closed");
-                let mut meta = meta_map;
-                meta.insert(
-                    "x-amz-meta-xtable-version".to_string(),
-                    alloc_v.to_string(),
-                );
-                meta.insert(
-                    "x-amz-meta-xtable-txn-id".to_string(),
-                    txn_id_owned.to_string(),
-                );
-                let res = backend
-                    .put_object(
-                        &ObjectKey::new(&s3_key),
-                        body,
-                        entry.content_type.as_deref(),
-                        meta,
-                    )
-                    .await;
-                (key_for_task, res.map(|_| ()))
-            };
-            futures.push(Box::pin(fut));
-        }
-
-        let mut results: Vec<(String, Result<(), BackendError>)> = Vec::new();
-        while let Some(item) = futures.next().await {
-            let _ = upload_keys;
-            results.push(item);
-        }
-        results
-    }
-
     fn require_active(&self, txn_id: &str) -> XtableResult<TxnStateRecord> {
         match self.store.get_txn_state(txn_id)? {
             Some(t) if t.status == TxnStatus::Active => Ok(t),
@@ -881,6 +712,37 @@ fn uuid_like(s: &str) -> String {
     use sha2::Digest;
     hasher.update(s.as_bytes());
     hex::encode(&hasher.finalize()[..12])
+}
+
+/// Parse a structured-data key into `(space, table, record_id)`.
+///
+/// Recognised shapes:
+///   - Records: `_xtable/{space}/{table}/{record_id}`
+///     → `(space, table, record_id)` (record_id captures everything
+///     after the second slash so paths like `_xtable/acme/users/u/1.json`
+///     still parse cleanly).
+///   - Schemas: `_xtable/{space}/_schema/{name}/v{N}.json`
+///     → `(space, "_schema", "{name}/v{N}")`
+///
+/// Returns `None` if the key doesn't match either shape. Non-structured
+/// keys (no `_xtable/` prefix) also return `None`; callers fall back to
+/// using the full key as the `record_id` with empty space/table so the
+/// entry stays isolated from the structured-data path.
+fn parse_record_key(backend_key: &str) -> Option<(String, String, String)> {
+    let stripped = backend_key.strip_prefix("_xtable/")?;
+    let mut it = stripped.splitn(3, '/');
+    let space = it.next()?.to_string();
+    let second = it.next()?.to_string();
+    let rest = it.next()?.to_string();
+    if second == "_schema" {
+        // `_xtable/{space}/_schema/{name}/v{N}.json` → record_id is
+        // `{name}/v{N}`. The splitn above already grouped the tail.
+        Some((space, "_schema".to_string(), rest))
+    } else {
+        // `_xtable/{space}/{table}/{record_id}`. `rest` is `{record_id}`.
+        // table is whatever was between the first and second '/'.
+        Some((space, second, rest))
+    }
 }
 
 #[cfg(test)]

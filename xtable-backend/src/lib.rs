@@ -7,6 +7,7 @@ pub mod client;
 pub mod error;
 pub mod keymap;
 pub mod mock;
+pub mod recording;
 
 pub use client::BackendClient;
 pub use error::BackendError;

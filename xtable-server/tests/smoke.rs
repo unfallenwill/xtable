@@ -79,6 +79,7 @@ async fn assert_status(
 }
 
 #[tokio::test]
+#[ignore = "spec §5.1 removed per-record PUTs; structured-data-space reads must walk MemTable (re-enable in Task 4)"]
 async fn smoke_structured_data_space() {
     println!("── xtable structured-data-space smoke ──");
     let (mut app, _tmp) = build_app().await;

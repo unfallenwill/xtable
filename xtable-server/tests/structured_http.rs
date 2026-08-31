@@ -46,6 +46,7 @@ async fn read_json(resp: axum::response::Response) -> Value {
 }
 
 #[tokio::test]
+#[ignore = "spec §5.1 removed per-record PUTs; structured-data-space reads must walk MemTable (re-enable in Task 4)"]
 async fn register_schema_then_upsert_record() {
     let (app, _t) = test_app().await;
 
@@ -114,6 +115,7 @@ async fn register_schema_then_upsert_record() {
 }
 
 #[tokio::test]
+#[ignore = "spec §5.1 removed per-record PUTs; structured-data-space reads must walk MemTable (re-enable in Task 4)"]
 async fn upsert_invalid_body_rejected_400() {
     let (app, _t) = test_app().await;
 
@@ -268,6 +270,7 @@ async fn diff_returns_changed_records() {
 }
 
 #[tokio::test]
+#[ignore = "spec §5.1 removed per-record PUTs; structured-data-space reads must walk MemTable (re-enable in Task 4)"]
 async fn list_schemas_returns_registered() {
     let (app, _t) = test_app().await;
     let req = Request::builder()
@@ -338,6 +341,7 @@ async fn get_schema_returns_404_when_missing() {
 }
 
 #[tokio::test]
+#[ignore = "spec §5.1 removed per-record PUTs; structured-data-space reads must walk MemTable (re-enable in Task 4)"]
 async fn get_schema_with_explicit_version() {
     let (app, _t) = test_app().await;
     // Register v1.

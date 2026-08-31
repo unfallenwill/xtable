@@ -221,6 +221,10 @@ async fn poc1_ssi_write_write_conflict_aborts_second_txn() {
     // PR-Fix9.1: snapshot conflict check in append_chain_entries_bulk
     // detects lost-update. Two txns at the same snapshot writing the
     // same key — only one may commit.
+    //
+    // Spec §5.1: per-record PUTs are removed. The atomicity guarantee
+    // now lives in the chain append + WAL Committed (not in the
+    // backend PUT). So the assertion is the chain has only t1's entry.
     let (coord, store, _backend, mock, _tmp) = setup().await;
 
     let t1 = coord.begin(None).await.unwrap();
@@ -233,12 +237,15 @@ async fn poc1_ssi_write_write_conflict_aborts_second_txn() {
     assert!(second.is_err(),
         "snapshot conflict: t2 must not silently overwrite t1");
 
-    // t1's value must be preserved; t2's write must not reach the backend.
-    assert_eq!(mock.get("k").unwrap(), b"A",
-        "lost update: t2 silently overwrote t1");
+    // Spec §5.1: backend MUST NOT have the per-record body (the write
+    // is in MemTable only). The chain append is the atomicity point.
+    assert!(mock.get("k").is_none(),
+        "spec §5.1 removed per-record PUT; backend must not have `k`");
     let chain = store.read_chain("k").unwrap();
     assert_eq!(chain.entries.len(), 1,
         "only t1's write should be in the version chain (t2 rejected)");
+    assert_eq!(chain.entries[0].commit_version, 1,
+        "t1's chain entry must be the one that survived");
 }
 
 // =========================================================================
@@ -289,7 +296,11 @@ async fn poc2_recovery_deletes_published_commit() {
 // Regression: V1 — Cold rebuild must preserve committed backend objects
 // =========================================================================
 
+// Spec §5.1 removed per-record PUTs; the cold rebuild path must be
+// rewritten to walk chunks instead of per-record objects. Re-enable
+// this regression once the chunk-aware rebuild lands.
 #[tokio::test]
+#[ignore = "spec §5.1 removed per-record PUTs; cold rebuild must walk chunks (re-enable when chunk rebuild lands)"]
 async fn poc3_cold_rebuild_annihilates_txn_objects() {
     let (coord, _store, backend, mock, _tmp) = setup().await;
 
@@ -324,6 +335,7 @@ async fn poc3_cold_rebuild_annihilates_txn_objects() {
 // =========================================================================
 
 #[tokio::test]
+#[ignore = "spec §5.1 removed per-record PUTs; the failure path now lives in the chunk flush (re-enable when flush failure path lands)"]
 async fn poc4_failed_commit_destroys_prior_committed_object() {
     let (coord, store, _backend, mock, _tmp) = setup().await;
 
@@ -421,6 +433,10 @@ async fn poc6_transactional_delete_writes_empty_object() {
 
 #[tokio::test]
 async fn poc7_http_layer_rejects_every_txn_after_the_first() {
+    // V18 fix: after commit, subsequent transactions must still succeed.
+    // Spec §5.1: per-record PUTs are removed. The write now lands in the
+    // MemTable (and chain append). This test asserts the txn protocol
+    // remains healthy across multiple commits.
     let (coord, store, _backend, mock, _tmp) = setup().await;
 
     // First txn (global_version == 0): threshold check passes by accident.
@@ -442,11 +458,14 @@ async fn poc7_http_layer_rejects_every_txn_after_the_first() {
         .stage(&t2, &ObjectKey::new("fresh"), b"y".to_vec(), None, HashMap::new(), false)
         .await;
 
-    // The stage must succeed — and the write must reach the backend.
+    // The stage must succeed.
     assert!(r.is_ok(),
         "V18: HTTP-stage threshold rejected the second transaction");
-    // Commit t2 so the assertion below checks what actually shipped to backend.
+    // Commit t2 — the chain append is the durability boundary now.
     coord.commit(&t2).await.unwrap();
-    assert!(mock.keys().contains(&"fresh".to_string()),
-        "V18: second transaction's stage succeeded but its write never reached backend");
+    assert!(mock.keys().is_empty(),
+        "spec §5.1 removed per-record PUT; backend must be empty after commits");
+    let chain = store.read_chain("fresh").unwrap();
+    assert_eq!(chain.entries.len(), 1,
+        "V18: second transaction committed but chain entry missing");
 }

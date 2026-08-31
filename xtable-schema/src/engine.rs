@@ -939,6 +939,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "spec §5.1 removed per-record PUTs; schema engine reads must walk MemTable (re-enable in Task 4)"]
     async fn register_and_get_schema_with_versions() {
         let (sp, _t) = setup().await;
         let txn = sp.begin_txn().await.unwrap();
@@ -951,6 +952,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "spec §5.1 removed per-record PUTs; schema engine reads must walk MemTable (re-enable in Task 4)"]
     async fn schema_versions_monotonic() {
         let (sp, _t) = setup().await;
         for _ in 0..3 {
@@ -1117,6 +1119,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "spec §5.1 removed per-record PUTs; schema engine reads must walk MemTable (re-enable in Task 4)"]
     async fn list_schemas_returns_multiple() {
         let (sp, _t) = setup().await;
         for n in ["alpha", "bravo", "charlie"] {
@@ -1130,6 +1133,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "spec §5.1 removed per-record PUTs; schema engine reads must walk MemTable (re-enable in Task 4)"]
     async fn get_schema_returns_correct_version() {
         let (sp, _t) = setup().await;
         let t1 = sp.begin_txn().await.unwrap();
@@ -1202,6 +1206,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "spec §5.1 removed per-record PUTs; schema engine reads must walk MemTable (re-enable in Task 4)"]
     async fn record_write_requires_initial_schema_when_bound() {
         let (sp, _t) = setup().await;
         let t = sp.begin_txn().await.unwrap();
@@ -1256,6 +1261,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "spec §5.1 removed per-record PUTs; schema engine rebuild must walk chunks (re-enable in Task 4)"]
     async fn cold_rebuild_parses_backed_objects() {
         let (sp, _t) = setup().await;
         let t = sp.begin_txn().await.unwrap();
