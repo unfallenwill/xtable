@@ -76,8 +76,8 @@ pub struct RecordIndexEntry {
     pub commit_version: u64,
     /// Tombstone flag — write removed the record.
     pub deleted: bool,
-    /// Backend S3 key holding the record's JSON body.
-    pub backend_key: String,
+    /// ULID of the chunk that contains the latest version of this key.
+    pub chunk_id: String,
     /// Schema version this record conforms to.
     pub schema_version: u32,
     /// Txn that produced this entry.

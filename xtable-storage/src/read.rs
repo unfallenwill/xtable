@@ -120,11 +120,8 @@ pub async fn read_at_snapshot(
         }));
     }
 
-    // 4. Chunk index lookup. RecordIndexEntry stores the chunk pointer
-    // in `backend_key` (the S3 key) — but for proper chunk reads we
-    // need the chunk_id. In v1 we use `backend_key` as the chunk key
-    // (until record index is migrated to include chunk_id explicitly in
-    // PR #5+).
+    // 4. Chunk index lookup. RecordIndexEntry now carries the chunk_id
+    // directly; `lookup_chunk_for_record` reads it via `store.get_chunk_index`.
     let chunk = lookup_chunk_for_record(store, &idx)?;
     let Some(chunk) = chunk else {
         return Ok(None);
@@ -180,26 +177,12 @@ fn entry_to_result(e: &crate::memtable::MemEntry, cv: u64, source: ReadSource) -
 }
 
 /// Find the chunk that contains `record_id`'s body, given a record-index
-/// entry. In v1 the chunk_id lives in `backend_key` (S3 key) — we
-/// decompose the path to derive the chunk_id, then look it up in
-/// `TBL_CHUNK_INDEX`.
+/// entry. The chunk id is carried directly in `idx.chunk_id`.
 fn lookup_chunk_for_record(
     store: &LocalStore,
     idx: &crate::txn_state::RecordIndexEntry,
 ) -> XtableResult<Option<ChunkIndexEntry>> {
-    // `idx.backend_key` is the chunk S3 key path. Extract the trailing
-    // `.xtc` ULID. Path shape:
-    //   `_xtable/<space>/<table>/<shard>/<chunk_id>.xtc`
-    let path = &idx.backend_key;
-    let chunk_id = match path
-        .rsplit('/')
-        .next()
-        .and_then(|s| s.strip_suffix(".xtc"))
-    {
-        Some(id) => id.to_string(),
-        None => return Ok(None),
-    };
-    store.get_chunk_index(&chunk_id)
+    store.get_chunk_index(&idx.chunk_id)
 }
 
 #[cfg(test)]

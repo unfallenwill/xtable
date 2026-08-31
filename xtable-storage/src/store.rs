@@ -1035,7 +1035,7 @@ mod tests {
         let entry = RecordIndexEntry {
             commit_version: 42,
             deleted: false,
-            backend_key: "k".into(),
+            chunk_id: "k".into(),
             schema_version: 3,
             txn_id: "TX".into(),
             updated_ms: 1_700_000_000_000,

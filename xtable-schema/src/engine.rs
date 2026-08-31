@@ -731,7 +731,7 @@ impl StructuredSpace {
                 let entry = RecordIndexEntry {
                     commit_version: 0, // unknown without chain walk; mark 0 to mean "rebuilt-from-backend, exact commit version unknown"
                     deleted: obj.size == 0 && body.is_null(),
-                    backend_key: obj.key.clone(),
+                    chunk_id: obj.key.clone(),
                     schema_version,
                     txn_id: String::new(),
                     updated_ms: Utc::now().timestamp_millis(),
@@ -832,7 +832,7 @@ fn post_commit_hook(store: LocalStore, pending: Arc<PendingMap>) -> PostCommitHo
             let entry = RecordIndexEntry {
                 commit_version: v,
                 deleted: r.body.is_null(),
-                backend_key: r.backend_key.clone(),
+                chunk_id: r.backend_key.clone(),
                 schema_version: r.schema_version,
                 txn_id: ev.txn_id.clone(),
                 updated_ms: now_ms,
