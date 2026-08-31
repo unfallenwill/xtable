@@ -25,9 +25,7 @@ use tracing::{info, warn};
 
 use xtable_backend::BackendClient;
 use xtable_core::{ObjectKey, XtableError, XtableResult};
-use xtable_storage::{
-    LocalStore, MemTableSet, RecordIndexEntry, SchemaIndexEntry,
-};
+use xtable_storage::{LocalStore, MemTableSet, RecordIndexEntry, SchemaIndexEntry};
 use xtable_telemetry::metrics::Metrics;
 use xtable_telemetry::timed::Timed;
 use xtable_telemetry::KeyValue;
@@ -198,7 +196,7 @@ pub struct StructuredSpace {
     pub store: LocalStore,
     pub backend: Arc<BackendClient>,
     /// PR #4: the LSM-tree memtable set shared with the txn coordinator.
-    /// `get_record` / `head_object` route through it via
+    /// `get_record` routes through it via
     /// `xtable_storage::read::read_at_snapshot` (spec §5.2). Decoupling
     /// from `txn` keeps the engine agnostic to who owns the set.
     pub mems: Arc<MemTableSet>,
@@ -217,7 +215,13 @@ impl StructuredSpace {
         let pending = Arc::new(PendingMap::default());
         let hook = post_commit_hook(store.clone(), Arc::clone(&pending));
         txn.register_post_commit_hook(hook);
-        Self { txn, store, backend, mems, pending }
+        Self {
+            txn,
+            store,
+            backend,
+            mems,
+            pending,
+        }
     }
 
     pub fn pending(&self) -> Arc<PendingMap> {
@@ -324,7 +328,9 @@ impl StructuredSpace {
         body: Value,
     ) -> XtableResult<()> {
         if !body.is_object() {
-            return Err(XtableError::invalid("table schema body must be a JSON object"));
+            return Err(XtableError::invalid(
+                "table schema body must be a JSON object",
+            ));
         }
         let alias_name = format!("_table::{table}");
         let next = self.next_schema_version(space, &alias_name)?;
@@ -467,7 +473,8 @@ impl StructuredSpace {
         );
         let space = write.space.clone();
         let table = write.table.clone();
-        let schema_version = self.resolve_table_schema_version(&t.txn_id, &space, &table, t.snapshot_version)?;
+        let schema_version =
+            self.resolve_table_schema_version(&t.txn_id, &space, &table, t.snapshot_version)?;
         // Validate if a schema is registered for this table.
         if let Some(sv) = schema_version {
             // Per spec §5.2 the schema body lives in chunks, mirrored into
@@ -475,29 +482,32 @@ impl StructuredSpace {
             // in that order. Never issue a per-record `backend.get_object`
             // against the legacy `_xtable/<space>/_schema/...` key — that
             // key no longer exists after the chunk-only refactor.
-            let body_value = if let Some(b) = self.table_schema_body(&t.txn_id, &space, &table, sv)? {
-                b
-            } else {
-                let alias_name = format!("_table::{table}");
-                let schema_record_id = format!("{alias_name}/v{sv}.json");
-                let r = xtable_storage::read::read_at_snapshot(
-                    &self.mems,
-                    &self.store,
-                    &self.backend,
-                    &space,
-                    "_schema",
-                    &schema_record_id,
-                    t.snapshot_version,
-                )
-                .await?;
-                match r {
-                    Some(rr) => serde_json::from_slice(&rr.body)
-                        .map_err(|e| XtableError::Serde(format!("schema body parse: {e}")))?,
-                    None => return Err(XtableError::InvalidArgument(format!(
-                        "schema body not found for {space}/{alias_name} v{sv}"
-                    ))),
-                }
-            };
+            let body_value =
+                if let Some(b) = self.table_schema_body(&t.txn_id, &space, &table, sv)? {
+                    b
+                } else {
+                    let alias_name = format!("_table::{table}");
+                    let schema_record_id = format!("{alias_name}/v{sv}.json");
+                    let r = xtable_storage::read::read_at_snapshot(
+                        &self.mems,
+                        &self.store,
+                        &self.backend,
+                        &space,
+                        "_schema",
+                        &schema_record_id,
+                        t.snapshot_version,
+                    )
+                    .await?;
+                    match r {
+                        Some(rr) => serde_json::from_slice(&rr.body)
+                            .map_err(|e| XtableError::Serde(format!("schema body parse: {e}")))?,
+                        None => {
+                            return Err(XtableError::InvalidArgument(format!(
+                                "schema body not found for {space}/{alias_name} v{sv}"
+                            )))
+                        }
+                    }
+                };
             let schema = JsonSchema(body_value);
             validate(&schema, &write.body).map_err(schema_validation_err)?;
         }
@@ -707,7 +717,13 @@ impl StructuredSpace {
         use std::collections::BTreeMap;
         let mut by_id: BTreeMap<String, (Option<Value>, Option<Value>)> = BTreeMap::new();
         for snap in [s1, s2] {
-            let res = self.query_records(&StructuredTxn::admin(), space, table, Query::new().include_deleted(true), Some(snap))?;
+            let res = self.query_records(
+                &StructuredTxn::admin(),
+                space,
+                table,
+                Query::new().include_deleted(true),
+                Some(snap),
+            )?;
             for r in res.records {
                 let entry = by_id.entry(r.record_id.clone()).or_insert((None, None));
                 let pos = if snap == s1 { 0 } else { 1 };
@@ -740,7 +756,10 @@ impl StructuredSpace {
         let alias_name = format!("_table::{table}");
         let _ = snapshot;
         // Pending (in this txn, not yet committed) wins over the index.
-        if let Some(v) = self.pending.latest_schema_version_in_txn(txn_id, space, &alias_name) {
+        if let Some(v) = self
+            .pending
+            .latest_schema_version_in_txn(txn_id, space, &alias_name)
+        {
             return Ok(Some(v));
         }
         Ok(self
@@ -758,7 +777,10 @@ impl StructuredSpace {
         schema_version: u32,
     ) -> XtableResult<Option<Value>> {
         let alias_name = format!("_table::{table}");
-        if let Some(v) = self.pending.latest_schema_body_in_txn(txn_id, space, &alias_name) {
+        if let Some(v) = self
+            .pending
+            .latest_schema_body_in_txn(txn_id, space, &alias_name)
+        {
             return Ok(Some(v));
         }
         // Spec §5.2: chunk-only storage. The schema body for the table
@@ -770,9 +792,9 @@ impl StructuredSpace {
         // `backend.get_object` against the legacy `_xtable/<space>/_schema/...`
         // key — that key no longer exists post-refactor.
         let record_id = format!("{alias_name}/v{schema_version}.json");
-        if let Ok(Some((_entry, body))) =
-            self.store
-                .get_record_index_with_body(space, "_schema", &record_id)
+        if let Ok(Some((_entry, body))) = self
+            .store
+            .get_record_index_with_body(space, "_schema", &record_id)
         {
             if !body.is_null() {
                 return Ok(Some(body));
@@ -820,7 +842,9 @@ fn post_commit_hook(store: LocalStore, pending: Arc<PendingMap>) -> PostCommitHo
                 txn_id: ev.txn_id.clone(),
                 updated_ms: now_ms,
             };
-            if let Err(e) = store.put_record_index_with_body(&r.space, &r.table, &r.record_id, &entry, &r.body) {
+            if let Err(e) =
+                store.put_record_index_with_body(&r.space, &r.table, &r.record_id, &entry, &r.body)
+            {
                 warn!(err = %e, key = %r.backend_key, "record index update failed");
             }
         }
@@ -840,9 +864,7 @@ fn post_commit_hook(store: LocalStore, pending: Arc<PendingMap>) -> PostCommitHo
             // placeheld with the per-schema backend_key for now;
             // `update_record_index_after_flush` rewrites it to the
             // chunk ULID once the memtable rotates.
-            if let Some((space, table, record_id)) =
-                schema_record_key_parts(&s.backend_key)
-            {
+            if let Some((space, table, record_id)) = schema_record_key_parts(&s.backend_key) {
                 let v = pick_record_version(&ev.writes, &s.backend_key, 0);
                 let entry = RecordIndexEntry {
                     commit_version: v,
@@ -852,9 +874,9 @@ fn post_commit_hook(store: LocalStore, pending: Arc<PendingMap>) -> PostCommitHo
                     txn_id: ev.txn_id.clone(),
                     updated_ms: now_ms,
                 };
-                if let Err(e) = store.put_record_index_with_body(
-                    &space, &table, &record_id, &entry, &s.body,
-                ) {
+                if let Err(e) =
+                    store.put_record_index_with_body(&space, &table, &record_id, &entry, &s.body)
+                {
                     warn!(
                         err = %e, key = %s.backend_key,
                         "schema record-index update failed"
@@ -967,28 +989,39 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "spec §5.1 removed per-record PUTs; schema engine reads must walk MemTable (re-enable in Task 4)"]
     async fn register_and_get_schema_with_versions() {
         let (sp, _t) = setup().await;
         let txn = sp.begin_txn().await.unwrap();
-        let v1 = sp.register_schema(&txn, "acme", "task", schema_obj()).await.unwrap();
+        let v1 = sp
+            .register_schema(&txn, "acme", "task", schema_obj())
+            .await
+            .unwrap();
         assert_eq!(v1, 1);
         sp.commit_txn(&txn).await.unwrap();
 
-        let info = sp.get_schema(&StructuredTxn::admin(), "acme", "task", None, None).await.unwrap().unwrap();
+        let info = sp
+            .get_schema(&StructuredTxn::admin(), "acme", "task", None, None)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(info.version, 1);
     }
 
     #[tokio::test]
-    #[ignore = "spec §5.1 removed per-record PUTs; schema engine reads must walk MemTable (re-enable in Task 4)"]
     async fn schema_versions_monotonic() {
         let (sp, _t) = setup().await;
         for _ in 0..3 {
             let txn = sp.begin_txn().await.unwrap();
-            sp.register_schema(&txn, "acme", "task", schema_obj()).await.unwrap();
+            sp.register_schema(&txn, "acme", "task", schema_obj())
+                .await
+                .unwrap();
             sp.commit_txn(&txn).await.unwrap();
         }
-        let info = sp.get_schema(&StructuredTxn::admin(), "acme", "task", None, None).await.unwrap().unwrap();
+        let info = sp
+            .get_schema(&StructuredTxn::admin(), "acme", "task", None, None)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(info.version, 3);
     }
 
@@ -997,8 +1030,12 @@ mod tests {
         let (sp, _t) = setup().await;
         let schema = schema_obj();
         let txn = sp.begin_txn().await.unwrap();
-        sp.register_schema(&txn, "acme", "task", schema.clone()).await.unwrap();
-        sp.bind_table_schema(&txn, "acme", "tasks", schema).await.unwrap();
+        sp.register_schema(&txn, "acme", "task", schema.clone())
+            .await
+            .unwrap();
+        sp.bind_table_schema(&txn, "acme", "tasks", schema)
+            .await
+            .unwrap();
         sp.upsert_record(
             &txn,
             RecordWrite {
@@ -1006,17 +1043,23 @@ mod tests {
                 table: "tasks".into(),
                 record_id: Some("a".into()),
                 body: json!({"title": "alpha", "done": false}),
-                            },
+            },
         )
         .await
         .unwrap();
         sp.commit_txn(&txn).await.unwrap();
 
-        let r = sp.get_record(&StructuredTxn::admin(), "acme", "tasks", "a", None).await.unwrap().unwrap();
+        let r = sp
+            .get_record(&StructuredTxn::admin(), "acme", "tasks", "a", None)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(r.body["title"], "alpha");
 
         let q = Query::new().order("title", OrderDir::Asc);
-        let res = sp.query_records(&StructuredTxn::admin(), "acme", "tasks", q, None).unwrap();
+        let res = sp
+            .query_records(&StructuredTxn::admin(), "acme", "tasks", q, None)
+            .unwrap();
         assert_eq!(res.records.len(), 1);
     }
 
@@ -1025,8 +1068,12 @@ mod tests {
         let (sp, _t) = setup().await;
         let schema = schema_obj();
         let txn = sp.begin_txn().await.unwrap();
-        sp.register_schema(&txn, "acme", "task", schema.clone()).await.unwrap();
-        sp.bind_table_schema(&txn, "acme", "tasks", schema).await.unwrap();
+        sp.register_schema(&txn, "acme", "task", schema.clone())
+            .await
+            .unwrap();
+        sp.bind_table_schema(&txn, "acme", "tasks", schema)
+            .await
+            .unwrap();
         let err = sp
             .upsert_record(
                 &txn,
@@ -1035,7 +1082,7 @@ mod tests {
                     table: "tasks".into(),
                     record_id: None,
                     body: json!({"no_title": true}),
-                                    },
+                },
             )
             .await
             .unwrap_err();
@@ -1053,7 +1100,7 @@ mod tests {
                 table: "tasks".into(),
                 record_id: Some("x".into()),
                 body: json!({"title": "x"}),
-                            },
+            },
         )
         .await
         .unwrap();
@@ -1063,7 +1110,11 @@ mod tests {
         sp.delete_record(&t2, "acme", "tasks", "x").await.unwrap();
         sp.commit_txn(&t2).await.unwrap();
 
-        assert!(sp.get_record(&StructuredTxn::admin(), "acme", "tasks", "x", None).await.unwrap().is_none());
+        assert!(sp
+            .get_record(&StructuredTxn::admin(), "acme", "tasks", "x", None)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -1077,12 +1128,16 @@ mod tests {
                 table: "tasks".into(),
                 record_id: Some("nope".into()),
                 body: json!({"title": "x"}),
-                            },
+            },
         )
         .await
         .unwrap();
         sp.abort_txn(&t).await.unwrap();
-        assert!(sp.get_record(&StructuredTxn::admin(), "acme", "tasks", "nope", None).await.unwrap().is_none());
+        assert!(sp
+            .get_record(&StructuredTxn::admin(), "acme", "tasks", "nope", None)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -1097,16 +1152,21 @@ mod tests {
                     table: "tasks".into(),
                     record_id: Some(id.into()),
                     body: json!({"title": format!("title-{id}"), "n": (id.as_bytes()[0] as u64)}),
-                                    },
+                },
             )
             .await
             .unwrap();
         }
         sp.commit_txn(&txn).await.unwrap();
         let q = Query::new()
-            .filter(Filter::Ge { field: "n".into(), value: json!(98) })
+            .filter(Filter::Ge {
+                field: "n".into(),
+                value: json!(98),
+            })
             .order("n", OrderDir::Asc);
-        let res = sp.query_records(&StructuredTxn::admin(), "acme", "tasks", q, None).unwrap();
+        let res = sp
+            .query_records(&StructuredTxn::admin(), "acme", "tasks", q, None)
+            .unwrap();
         let ids: Vec<_> = res.records.iter().map(|r| r.record_id.clone()).collect();
         // 'a' is 97, 'b' is 98, 'c' is 99 — filter n>=98 returns b,c sorted ascending by n.
         assert_eq!(ids, vec!["b".to_string(), "c".to_string()]);
@@ -1123,7 +1183,7 @@ mod tests {
                 table: "t".into(),
                 record_id: Some("r".into()),
                 body: json!({"v": 1}),
-                            },
+            },
         )
         .await
         .unwrap();
@@ -1136,7 +1196,7 @@ mod tests {
                 table: "t".into(),
                 record_id: Some("r".into()),
                 body: json!({"v": 2}),
-                            },
+            },
         )
         .await
         .unwrap();
@@ -1147,12 +1207,13 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "spec §5.1 removed per-record PUTs; schema engine reads must walk MemTable (re-enable in Task 4)"]
     async fn list_schemas_returns_multiple() {
         let (sp, _t) = setup().await;
         for n in ["alpha", "bravo", "charlie"] {
             let t = sp.begin_txn().await.unwrap();
-            sp.register_schema(&t, "s", n, json!({"type":"object"})).await.unwrap();
+            sp.register_schema(&t, "s", n, json!({"type":"object"}))
+                .await
+                .unwrap();
             sp.commit_txn(&t).await.unwrap();
         }
         let list = sp.list_schemas(&StructuredTxn::admin(), "s").await.unwrap();
@@ -1161,7 +1222,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "spec §5.1 removed per-record PUTs; schema engine reads must walk MemTable (re-enable in Task 4)"]
     async fn get_schema_returns_correct_version() {
         let (sp, _t) = setup().await;
         let t1 = sp.begin_txn().await.unwrap();
@@ -1175,8 +1235,16 @@ mod tests {
             .unwrap();
         sp.commit_txn(&t2).await.unwrap();
 
-        let v1 = sp.get_schema(&StructuredTxn::admin(), "s", "n", Some(1), None).await.unwrap().unwrap();
-        let v2 = sp.get_schema(&StructuredTxn::admin(), "s", "n", None, None).await.unwrap().unwrap();
+        let v1 = sp
+            .get_schema(&StructuredTxn::admin(), "s", "n", Some(1), None)
+            .await
+            .unwrap()
+            .unwrap();
+        let v2 = sp
+            .get_schema(&StructuredTxn::admin(), "s", "n", None, None)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(v1.version, 1);
         assert_eq!(v2.version, 2);
         assert_eq!(v1.body["minimum"], 1);
@@ -1194,13 +1262,17 @@ mod tests {
                 table: "t".into(),
                 record_id: Some("r".into()),
                 body: json!({"v": 1}),
-                            },
+            },
         )
         .await
         .unwrap();
         let _ = sp.commit_txn(&t).await.unwrap();
         // Default snap is current_global_version — record exists.
-        assert!(sp.get_record(&StructuredTxn::admin(), "s", "t", "r", None).await.unwrap().is_some());
+        assert!(sp
+            .get_record(&StructuredTxn::admin(), "s", "t", "r", None)
+            .await
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]
@@ -1218,10 +1290,7 @@ mod tests {
     async fn delete_unknown_record_returns_404() {
         let (sp, _t) = setup().await;
         let t = sp.begin_txn().await.unwrap();
-        let err = sp
-            .delete_record(&t, "s", "t", "no-such")
-            .await
-            .unwrap_err();
+        let err = sp.delete_record(&t, "s", "t", "no-such").await.unwrap_err();
         assert_eq!(err.http_status(), 404);
     }
 
@@ -1234,20 +1303,29 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "spec §5.1 removed per-record PUTs; schema engine reads must walk MemTable (re-enable in Task 4)"]
     async fn record_write_requires_initial_schema_when_bound() {
         let (sp, _t) = setup().await;
         let t = sp.begin_txn().await.unwrap();
-        sp.register_schema(&t, "s", "task", json!({
-            "type": "object", "required": ["title"],
-            "properties": {"title": {"type": "string"}}
-        }))
+        sp.register_schema(
+            &t,
+            "s",
+            "task",
+            json!({
+                "type": "object", "required": ["title"],
+                "properties": {"title": {"type": "string"}}
+            }),
+        )
         .await
         .unwrap();
-        sp.bind_table_schema(&t, "s", "tasks", json!({
-            "type": "object", "required": ["title"],
-            "properties": {"title": {"type": "string"}}
-        }))
+        sp.bind_table_schema(
+            &t,
+            "s",
+            "tasks",
+            json!({
+                "type": "object", "required": ["title"],
+                "properties": {"title": {"type": "string"}}
+            }),
+        )
         .await
         .unwrap();
         sp.commit_txn(&t).await.unwrap();
@@ -1262,7 +1340,7 @@ mod tests {
                     table: "tasks".into(),
                     record_id: None,
                     body: json!({"n": 1}),
-                                    },
+                },
             )
             .await
             .unwrap_err();
@@ -1272,7 +1350,9 @@ mod tests {
     #[tokio::test]
     async fn empty_table_query_returns_no_records() {
         let (sp, _t) = setup().await;
-        let res = sp.query_records(&StructuredTxn::admin(), "s", "t", Query::new(), None).unwrap();
+        let res = sp
+            .query_records(&StructuredTxn::admin(), "s", "t", Query::new(), None)
+            .unwrap();
         assert!(res.records.is_empty());
         assert_eq!(res.total_matched, 0);
     }
