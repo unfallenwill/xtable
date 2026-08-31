@@ -292,18 +292,17 @@ impl StructuredSpace {
         let next = self.next_schema_version(space, name)?;
         let key = schema_key(space, name, next)?;
         let raw = serde_json::to_vec(&body).map_err(XtableError::from)?;
-        let mut meta = HashMap::new();
-        meta.insert("x-xtable-kind".to_string(), "schema".to_string());
-        meta.insert("x-xtable-space".to_string(), space.to_string());
-        meta.insert("x-xtable-name".to_string(), name.to_string());
-        meta.insert("x-xtable-version".to_string(), next.to_string());
+        // Spec §5.1: the body is staged and routed into the MemTable
+        // (no per-schema S3 PUT, no per-schema user metadata). The chunk
+        // pipeline is the single writer of structured data, same as
+        // upsert_record.
         self.txn
             .stage(
                 &t.txn_id,
                 &ObjectKey::new(&key),
                 raw,
                 Some("application/schema+json".to_string()),
-                meta,
+                HashMap::new(),
                 false,
             )
             .await?;
@@ -338,18 +337,16 @@ impl StructuredSpace {
         let next = self.next_schema_version(space, &alias_name)?;
         let key = schema_key(space, &alias_name, next)?;
         let raw = serde_json::to_vec(&body).map_err(XtableError::from)?;
-        let mut meta = HashMap::new();
-        meta.insert("x-xtable-kind".to_string(), "table-schema-alias".to_string());
-        meta.insert("x-xtable-space".to_string(), space.to_string());
-        meta.insert("x-xtable-name".to_string(), alias_name.clone());
-        meta.insert("x-xtable-version".to_string(), next.to_string());
+        // Spec §5.1: drop x-xtable-* metadata — chunks don't need it.
+        // Body is staged into the MemTable; the flush pipeline carries
+        // it from there into a chunk.
         self.txn
             .stage(
                 &t.txn_id,
                 &ObjectKey::new(&key),
                 raw,
                 Some("application/schema+json".to_string()),
-                meta,
+                HashMap::new(),
                 false,
             )
             .await?;
@@ -865,6 +862,34 @@ fn post_commit_hook(store: LocalStore, pending: Arc<PendingMap>) -> PostCommitHo
             if let Err(e) = store.put_schema_index(&s.space, &s.name, &entry) {
                 warn!(err = %e, key = %s.name, "schema index update failed");
             }
+            // Spec §5.1: schemas ride the same chunk pipeline as records.
+            // Mirror the record-side TBL_RECORD_INDEX write so the LSM
+            // read path can locate the schema body by its MemTable key
+            // `(space, "_schema", "{name}/v{N}.json")`. The chunk_id is
+            // placeheld with the per-schema backend_key for now;
+            // `update_record_index_after_flush` rewrites it to the
+            // chunk ULID once the memtable rotates.
+            if let Some((space, table, record_id)) =
+                schema_record_key_parts(&s.backend_key)
+            {
+                let v = pick_record_version(&ev.writes, &s.backend_key, 0);
+                let entry = RecordIndexEntry {
+                    commit_version: v,
+                    deleted: false,
+                    chunk_id: s.backend_key.clone(),
+                    schema_version: s.version,
+                    txn_id: ev.txn_id.clone(),
+                    updated_ms: now_ms,
+                };
+                if let Err(e) = store.put_record_index_with_body(
+                    &space, &table, &record_id, &entry, &s.body,
+                ) {
+                    warn!(
+                        err = %e, key = %s.backend_key,
+                        "schema record-index update failed"
+                    );
+                }
+            }
         }
         info!(
             txn = %ev.txn_id,
@@ -872,6 +897,22 @@ fn post_commit_hook(store: LocalStore, pending: Arc<PendingMap>) -> PostCommitHo
             "structured post-commit applied"
         );
     })
+}
+
+/// Parse a schema backend key `_xtable/<space>/_schema/<name>[/...]/v{N}.json`
+/// into the MemTable-shape tuple `(space, "_schema", "{name}.../v{N}.json")`.
+/// Mirrors the schema branch of `parse_record_key` in `xtable-tx`. Returns
+/// `None` if `backend_key` doesn't match the schema key shape.
+fn schema_record_key_parts(backend_key: &str) -> Option<(String, String, String)> {
+    let stripped = backend_key.strip_prefix("_xtable/")?;
+    let mut it = stripped.splitn(3, '/');
+    let space = it.next()?.to_string();
+    let second = it.next()?;
+    if second != "_schema" {
+        return None;
+    }
+    let rest = it.next()?.to_string();
+    Some((space, "_schema".to_string(), rest))
 }
 
 fn pick_record_version(writes: &[xtable_tx::CommitWrite], key: &str, fallback: u64) -> u64 {
