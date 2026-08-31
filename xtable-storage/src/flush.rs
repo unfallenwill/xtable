@@ -192,6 +192,24 @@ pub async fn flush_one(
     // 8. Persist ChunkIndexEntry in redb (durable point of no return).
     store.put_chunk_index(&chunk_id, &entry)?;
 
+    // 8b. Update TBL_RECORD_INDEX chunk_ids for every flushed entry
+    // (spec §5.2). The structured layer writes a per-record row at
+    // commit time with `chunk_id` placeholdered by the per-record key;
+    // without this update, post-flush `read_at_snapshot` lookups fall
+    // through to `store.get_chunk_index(<per_record_key>)` and miss.
+    // Existing entries preserve their body / commit_version; only
+    // `chunk_id` is rewritten.
+    if let Err(e) = update_record_index_after_flush(store, mt, &chunk_id) {
+        // Best-effort: a stale chunk_id means the read falls through
+        // to memtable → immutables, but those are gone post-flush, so
+        // log loudly so a chunk-miss bug surfaces.
+        tracing::warn!(
+            error = %e,
+            chunk_id = %chunk_id,
+            "TBL_RECORD_INDEX chunk_id update failed; post-flush reads may miss"
+        );
+    }
+
     // 9. Append WAL `MemtableFlushed`.
     let _seq = store.append_wal(&WalRecord::MemtableFlushed {
         chunk_id: chunk_id.clone(),
@@ -216,6 +234,27 @@ pub async fn flush_one(
         elapsed_ms = elapsed.as_millis() as u64,
         "chunk flush complete"
     );
+    Ok(())
+}
+
+/// Walk every MemEntry in the just-flushed memtable and rewrite the
+/// matching TBL_RECORD_INDEX row so its `chunk_id` field points at the
+/// new chunk ULID. Best-effort: callers should warn on error.
+fn update_record_index_after_flush(
+    store: &crate::store::LocalStore,
+    mt: &Arc<MemTable>,
+    new_chunk_id: &str,
+) -> XtableResult<()> {
+    for entry in mt.map.iter() {
+        let e: &MemEntry = entry.value();
+        let cv = e.commit_version.load(std::sync::atomic::Ordering::Acquire);
+        // Skip entries that never became visible (commit aborted mid-flight
+        // or staged but never published). The chunk won't carry them either.
+        if cv == crate::memtable::INVISIBLE {
+            continue;
+        }
+        store.update_record_index_chunk_id(&e.key.0, &e.key.1, &e.key.2, new_chunk_id)?;
+    }
     Ok(())
 }
 

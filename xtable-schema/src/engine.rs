@@ -27,7 +27,7 @@ use tracing::{info, warn};
 use xtable_backend::BackendClient;
 use xtable_core::{ObjectKey, XtableError, XtableResult};
 use xtable_storage::{
-    LocalStore, RecordIndexEntry, SchemaIndexEntry,
+    LocalStore, MemTableSet, RecordIndexEntry, SchemaIndexEntry,
 };
 use xtable_telemetry::metrics::Metrics;
 use xtable_telemetry::timed::Timed;
@@ -204,6 +204,11 @@ pub struct StructuredSpace {
     pub txn: Arc<TxnCoordinator>,
     pub store: LocalStore,
     pub backend: Arc<BackendClient>,
+    /// PR #4: the LSM-tree memtable set shared with the txn coordinator.
+    /// `get_record` / `head_object` route through it via
+    /// `xtable_storage::read::read_at_snapshot` (spec §5.2). Decoupling
+    /// from `txn` keeps the engine agnostic to who owns the set.
+    pub mems: Arc<MemTableSet>,
     pending: Arc<PendingMap>,
 }
 
@@ -215,10 +220,11 @@ impl std::fmt::Debug for StructuredSpace {
 
 impl StructuredSpace {
     pub fn new(txn: Arc<TxnCoordinator>, store: LocalStore, backend: Arc<BackendClient>) -> Self {
+        let mems = Arc::clone(txn.memtable_set());
         let pending = Arc::new(PendingMap::default());
         let hook = post_commit_hook(store.clone(), Arc::clone(&pending));
         txn.register_post_commit_hook(hook);
-        Self { txn, store, backend, pending }
+        Self { txn, store, backend, mems, pending }
     }
 
     pub fn pending(&self) -> Arc<PendingMap> {
@@ -560,7 +566,7 @@ impl StructuredSpace {
         Ok(())
     }
 
-    pub fn get_record(
+    pub async fn get_record(
         &self,
         txn: &StructuredTxn,
         space: &str,
@@ -573,32 +579,41 @@ impl StructuredSpace {
             vec![KeyValue::new("op", "get_record")],
         );
         let snap = snapshot.unwrap_or(txn.snapshot_version);
-        match self.store.get_record_index_with_body(space, table, record_id)? {
-            None => Ok(None),
-            Some((idx, body)) => {
-                // PR-Fix8.3: capture ReadSet for SSI cycle detection.
-                let key_str = record_key(space, table, record_id)?;
-                txn.record_read(ObjectKey::new(&key_str), idx.commit_version);
-                if idx.commit_version > snap {
-                    // record was modified after the requested snapshot —
-                    // for v1 (single-entry index) we surface it as "not
-                    // visible at this snapshot".
-                    return Ok(None);
-                }
-                if idx.deleted {
-                    return Ok(None);
-                }
-                Ok(Some(Record {
-                    space: space.to_string(),
-                    table: table.to_string(),
-                    record_id: record_id.to_string(),
-                    body,
-                    schema_version: idx.schema_version,
-                    commit_version: idx.commit_version,
-                    deleted: false,
-                }))
-            }
+        // Per spec §5.2 the structured read path goes through the LSM
+        // chunk decode. `read_at_snapshot` walks active memtable →
+        // immutables → TBL_RECORD_INDEX → chunk lookup, and returns the
+        // body bytes (decoded from the chunk) plus the commit_version.
+        // No per-record `get_object` against S3 is issued.
+        let res = xtable_storage::read::read_at_snapshot(
+            &self.mems,
+            &self.store,
+            &self.backend,
+            space,
+            table,
+            record_id,
+            snap,
+        )
+        .await?;
+        let Some(r) = res else {
+            return Ok(None);
+        };
+        if r.deleted {
+            return Ok(None);
         }
+        // PR-Fix8.3: capture ReadSet for SSI cycle detection.
+        let key_str = record_key(space, table, record_id)?;
+        txn.record_read(ObjectKey::new(&key_str), r.commit_version);
+        let body: Value = serde_json::from_slice(&r.body)
+            .map_err(|e| XtableError::Serde(format!("record body parse: {e}")))?;
+        Ok(Some(Record {
+            space: space.to_string(),
+            table: table.to_string(),
+            record_id: record_id.to_string(),
+            body,
+            schema_version: r.schema_version,
+            commit_version: r.commit_version,
+            deleted: false,
+        }))
     }
 
     #[tracing::instrument(level = "info", name = "schema.query", skip_all, fields(space = %space, table = %table, op = "query"), err)]
@@ -899,6 +914,7 @@ impl StructuredSpace {
                 txn: self.txn.clone(),
                 store: self.store.clone(),
                 backend: self.backend.clone(),
+                mems: Arc::clone(&self.mems),
                 pending: Arc::clone(&self.pending),
             }),
         })
@@ -984,7 +1000,7 @@ mod tests {
         .unwrap();
         sp.commit_txn(&txn).await.unwrap();
 
-        let r = sp.get_record(&StructuredTxn::admin(), "acme", "tasks", "a", None).unwrap().unwrap();
+        let r = sp.get_record(&StructuredTxn::admin(), "acme", "tasks", "a", None).await.unwrap().unwrap();
         assert_eq!(r.body["title"], "alpha");
 
         let q = Query::new().order("title", OrderDir::Asc);
@@ -1035,7 +1051,7 @@ mod tests {
         sp.delete_record(&t2, "acme", "tasks", "x").await.unwrap();
         sp.commit_txn(&t2).await.unwrap();
 
-        assert!(sp.get_record(&StructuredTxn::admin(), "acme", "tasks", "x", None).unwrap().is_none());
+        assert!(sp.get_record(&StructuredTxn::admin(), "acme", "tasks", "x", None).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1054,7 +1070,7 @@ mod tests {
         .await
         .unwrap();
         sp.abort_txn(&t).await.unwrap();
-        assert!(sp.get_record(&StructuredTxn::admin(), "acme", "tasks", "nope", None).unwrap().is_none());
+        assert!(sp.get_record(&StructuredTxn::admin(), "acme", "tasks", "nope", None).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1172,7 +1188,7 @@ mod tests {
         .unwrap();
         let _ = sp.commit_txn(&t).await.unwrap();
         // Default snap is current_global_version — record exists.
-        assert!(sp.get_record(&StructuredTxn::admin(), "s", "t", "r", None).unwrap().is_some());
+        assert!(sp.get_record(&StructuredTxn::admin(), "s", "t", "r", None).await.unwrap().is_some());
     }
 
     #[tokio::test]

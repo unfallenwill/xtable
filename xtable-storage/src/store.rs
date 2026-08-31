@@ -731,6 +731,45 @@ impl LocalStore {
         })
     }
 
+    /// Update only the `chunk_id` field on an existing record index
+    /// row. Body (StoredRecord.body_json) is preserved verbatim. Used
+    /// by `flush_one` after the chunk is persisted so post-flush reads
+    /// via `read_at_snapshot` resolve to the chunk (spec §5.2).
+    /// No-op if no row exists.
+    pub fn update_record_index_chunk_id(
+        &self,
+        space: &str,
+        table: &str,
+        record_id: &str,
+        new_chunk_id: &str,
+    ) -> XtableResult<bool> {
+        self.with_write(|txn| {
+            let mut tbl = txn.open_table(TBL_RECORD_INDEX).map_err(redb_err)?;
+            let raw = match tbl.get((space, table, record_id)).map_err(redb_err)? {
+                Some(v) => v.value().to_vec(),
+                None => return Ok(false),
+            };
+            // Try the body-carrying StoredRecord shape first (most
+            // common after a structured commit). Fall back to the bare
+            // RecordIndexEntry shape in case legacy data exists.
+            if let Ok(mut stored) = bincode::deserialize::<StoredRecord>(&raw) {
+                stored.entry.chunk_id = new_chunk_id.to_string();
+                let bytes = bincode::serialize(&stored).map_err(XtableError::from)?;
+                tbl.insert((space, table, record_id), bytes.as_slice())
+                    .map_err(redb_err)?;
+                return Ok(true);
+            }
+            if let Ok(mut entry) = bincode::deserialize::<RecordIndexEntry>(&raw) {
+                entry.chunk_id = new_chunk_id.to_string();
+                let bytes = bincode::serialize(&entry).map_err(XtableError::from)?;
+                tbl.insert((space, table, record_id), bytes.as_slice())
+                    .map_err(redb_err)?;
+                return Ok(true);
+            }
+            Err(XtableError::Storage("record index: decode failed".into()))
+        })
+    }
+
     /// Iterate all record index entries for a (space, table). Yields
     /// (record_id, RecordIndexEntry) — caller filters by snapshot.
     pub fn iter_record_index(

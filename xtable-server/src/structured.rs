@@ -345,7 +345,8 @@ async fn get_record(
     };
     let result = state
         .structured
-        .get_record(&txn, &space, &table, &record_id, snap);
+        .get_record(&txn, &space, &table, &record_id, snap)
+        .await;
     let _ = state.structured.abort_txn(&txn).await;
     match result {
         Ok(Some(r)) => (

@@ -71,9 +71,13 @@ async fn commit_does_not_put_object_per_record() {
         "commit must not issue any delete_object");
 
     // The entry IS in the MemTable — that is the new single writer.
+    // PR #4: the memtable key strips the `.json` suffix on the record
+    // id (matches the schema engine's `parse_record_key`); earlier the
+    // coordinator left it in and reads via the structured engine
+    // missed.
     let active = memtable_set.active.read();
     let entry = active
-        .get_visible(&("acme".into(), "users".into(), "u1.json".into()), u64::MAX)
+        .get_visible(&("acme".into(), "users".into(), "u1".into()), u64::MAX)
         .expect("entry should be in active MemTable");
     assert!(entry.value.bytes.starts_with(b"{\"id\":\"u1\"}"));
 }

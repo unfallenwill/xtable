@@ -739,9 +739,12 @@ fn parse_record_key(backend_key: &str) -> Option<(String, String, String)> {
         // `{name}/v{N}`. The splitn above already grouped the tail.
         Some((space, "_schema".to_string(), rest))
     } else {
-        // `_xtable/{space}/{table}/{record_id}`. `rest` is `{record_id}`.
-        // table is whatever was between the first and second '/'.
-        Some((space, second, rest))
+        // `_xtable/{space}/{table}/{record_id}.json`. Mirror the
+        // schema-engine parser: drop the trailing `.json` so the
+        // memtable key matches what callers (and the record index)
+        // use as the bare `record_id`.
+        let record_id = rest.strip_suffix(".json")?.to_string();
+        Some((space, second, record_id))
     }
 }
 
