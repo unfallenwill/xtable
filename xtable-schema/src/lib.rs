@@ -27,7 +27,7 @@ pub mod validation;
 pub mod engine;
 pub mod query;
 
-pub use engine::{RebuildReport, RecordWrite, SchemaInfo, StructuredReader, StructuredSpace, StructuredTxn, WriteOutcome};
+pub use engine::{RecordWrite, SchemaInfo, StructuredReader, StructuredSpace, StructuredTxn, WriteOutcome};
 pub use key::{schema_key, record_key, parse_record_key, parse_schema_key, RecordKeyParts, SchemaKeyParts};
 pub use validation::{JsonSchema, validate};
 pub use query::{Filter, OrderBy, OrderDir, Query, QueryResult, Record};

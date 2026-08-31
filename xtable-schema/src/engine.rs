@@ -20,7 +20,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{info, warn};
 
@@ -34,7 +33,7 @@ use xtable_telemetry::timed::Timed;
 use xtable_telemetry::KeyValue;
 use xtable_tx::{CommitEvent, PostCommitHook, TxnCoordinator};
 
-use crate::key::{is_structured_key, parse_record_key, parse_schema_key, record_key, schema_key};
+use crate::key::{record_key, schema_key};
 use crate::query::{Query, QueryResult, Record};
 use crate::validation::{validate, JsonSchema, ValidationError};
 
@@ -117,12 +116,6 @@ pub struct SchemaInfo {
     pub name: String,
     pub version: u32,
     pub body: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RebuildReport {
-    pub records: usize,
-    pub schemas: usize,
 }
 
 // ---------- Pending-write book-keeping ----------
@@ -380,14 +373,27 @@ impl StructuredSpace {
         if effective == 0 || effective > idx.latest_version {
             return Ok(None);
         }
-        let key = schema_key(space, name, effective)?;
-        let r = self
-            .backend
-            .get_object(&ObjectKey::new(&key))
-            .await
-            .map_err(|e| XtableError::Backend(format!("{e}")))?;
-        let body: Value = serde_json::from_slice(&r.bytes)
-            .map_err(|e| XtableError::Serde(format!("schema body parse: {e}")))?;
+        // Per spec §5.2 schema bodies live in chunks now. Resolve via
+        // the LSM read path (memtable → TBL_RECORD_INDEX → chunk). The
+        // TBL_RECORD_INDEX mirror under `(space, "_schema",
+        // "{name}/v{N}.json")` is populated by the post-commit hook
+        // (`schema_record_key_parts`).
+        let schema_record_id = format!("{name}/v{effective}.json");
+        let r = xtable_storage::read::read_at_snapshot(
+            &self.mems,
+            &self.store,
+            &self.backend,
+            space,
+            "_schema",
+            &schema_record_id,
+            _snap,
+        )
+        .await?;
+        let body: Value = match r {
+            Some(rr) => serde_json::from_slice(&rr.body)
+                .map_err(|e| XtableError::Serde(format!("schema body parse: {e}")))?,
+            None => return Ok(None),
+        };
         Ok(Some(SchemaInfo {
             space: space.to_string(),
             name: name.to_string(),
@@ -401,14 +407,24 @@ impl StructuredSpace {
         _txn: &StructuredTxn,
         space: &str,
     ) -> XtableResult<Vec<SchemaInfo>> {
+        let snap = _txn.snapshot_version;
         let mut out = Vec::new();
         for (name, _idx) in self.store.iter_schema_index(space)? {
-            let v = self
-                .backend
-                .get_object(&ObjectKey::new(&schema_key(space, &name, _idx.latest_version)?))
-                .await
-                .map_err(|e| XtableError::Backend(format!("{e}")))?;
-            let body: Value = serde_json::from_slice(&v.bytes)
+            // Per spec §5.2 schema bodies live in chunks. Resolve via the
+            // LSM read path under `(space, "_schema", "{name}/v{N}.json")`.
+            let schema_record_id = format!("{name}/v{}.json", _idx.latest_version);
+            let r = xtable_storage::read::read_at_snapshot(
+                &self.mems,
+                &self.store,
+                &self.backend,
+                space,
+                "_schema",
+                &schema_record_id,
+                snap,
+            )
+            .await?;
+            let Some(rr) = r else { continue };
+            let body: Value = serde_json::from_slice(&rr.body)
                 .map_err(|e| XtableError::Serde(format!("schema body parse: {e}")))?;
             out.push(SchemaInfo {
                 space: space.to_string(),
@@ -454,20 +470,33 @@ impl StructuredSpace {
         let schema_version = self.resolve_table_schema_version(&t.txn_id, &space, &table, t.snapshot_version)?;
         // Validate if a schema is registered for this table.
         if let Some(sv) = schema_version {
-            // Try pending first (same-txn registrations), otherwise fetch
-            // the committed schema body from the backend.
+            // Per spec §5.2 the schema body lives in chunks, mirrored into
+            // TBL_RECORD_INDEX for fast access. Walk pending → index → chunk
+            // in that order. Never issue a per-record `backend.get_object`
+            // against the legacy `_xtable/<space>/_schema/...` key — that
+            // key no longer exists after the chunk-only refactor.
             let body_value = if let Some(b) = self.table_schema_body(&t.txn_id, &space, &table, sv)? {
                 b
             } else {
                 let alias_name = format!("_table::{table}");
-                let key = schema_key(&space, &alias_name, sv)?;
-                let r = self
-                    .backend
-                    .get_object(&ObjectKey::new(&key))
-                    .await
-                    .map_err(|e| XtableError::Backend(format!("{e}")))?;
-                serde_json::from_slice(&r.bytes)
-                    .map_err(|e| XtableError::Serde(format!("schema body parse: {e}")))?
+                let schema_record_id = format!("{alias_name}/v{sv}.json");
+                let r = xtable_storage::read::read_at_snapshot(
+                    &self.mems,
+                    &self.store,
+                    &self.backend,
+                    &space,
+                    "_schema",
+                    &schema_record_id,
+                    t.snapshot_version,
+                )
+                .await?;
+                match r {
+                    Some(rr) => serde_json::from_slice(&rr.body)
+                        .map_err(|e| XtableError::Serde(format!("schema body parse: {e}")))?,
+                    None => return Err(XtableError::InvalidArgument(format!(
+                        "schema body not found for {space}/{alias_name} v{sv}"
+                    ))),
+                }
             };
             let schema = JsonSchema(body_value);
             validate(&schema, &write.body).map_err(schema_validation_err)?;
@@ -703,59 +732,6 @@ impl StructuredSpace {
         Ok(out)
     }
 
-    /// Cold rebuild: walk every `_xtable/` key in the backend, parse each
-    /// body, refill the local index. Used by startup if the local index is
-    /// missing/stale.
-    pub async fn rebuild(&self) -> XtableResult<RebuildReport> {
-        let listed = self
-            .backend
-            .list_objects()
-            .await
-            .map_err(|e| XtableError::Backend(format!("{e}")))?;
-        let mut records = 0usize;
-        let mut schemas = 0usize;
-        for obj in listed {
-            if !is_structured_key(&obj.key) {
-                continue;
-            }
-            let body_res = self.backend.get_object(&ObjectKey::new(&obj.key)).await;
-            let bytes = match body_res {
-                Ok(r) => r.bytes,
-                Err(_) => continue,
-            };
-            let parse_value: serde_json::Result<Value> = serde_json::from_slice(&bytes);
-            if let Some(p) = parse_schema_key(&obj.key) {
-                let now_ms = Utc::now().timestamp_millis();
-                let idx = SchemaIndexEntry {
-                    latest_version: p.version,
-                    latest_backend_key: obj.key.clone(),
-                    registered_ms: now_ms,
-                };
-                let _ = parse_value; // body is read on demand later
-                self.store.put_schema_index(&p.space, &p.name, &idx)?;
-                schemas += 1;
-            } else if let Some(p) = parse_record_key(&obj.key) {
-                let body = match parse_value {
-                    Ok(v) => v,
-                    Err(_) => Value::Null,
-                };
-                let schema_version = lookup_schema_version_in_meta(None);
-                let entry = RecordIndexEntry {
-                    commit_version: 0, // unknown without chain walk; mark 0 to mean "rebuilt-from-backend, exact commit version unknown"
-                    deleted: obj.size == 0 && body.is_null(),
-                    chunk_id: obj.key.clone(),
-                    schema_version,
-                    txn_id: String::new(),
-                    updated_ms: Utc::now().timestamp_millis(),
-                };
-                self.store
-                    .put_record_index_with_body(&p.space, &p.table, &p.record_id, &entry, &body)?;
-                records += 1;
-            }
-        }
-        Ok(RebuildReport { records, schemas })
-    }
-
     // ---- Internals ----
 
     fn resolve_table_schema_version(
@@ -783,15 +759,29 @@ impl StructuredSpace {
         txn_id: &str,
         space: &str,
         table: &str,
-        _schema_version: u32,
+        schema_version: u32,
     ) -> XtableResult<Option<Value>> {
         let alias_name = format!("_table::{table}");
         if let Some(v) = self.pending.latest_schema_body_in_txn(txn_id, space, &alias_name) {
             return Ok(Some(v));
         }
-        // Fallback to committed index (sync form, but caller is async so
-        // we can dispatch). In v1 we always have the body in pending or
-        // we treat it as missing — async lookup is optional.
+        // Spec §5.2: chunk-only storage. The schema body for the table
+        // alias is mirrored into TBL_RECORD_INDEX under
+        // (space, "_schema", "_table::{table}/v{N}.json") by the
+        // post-commit hook (see `post_commit_hook` /
+        // `schema_record_key_parts`). Read it back from there so the
+        // upsert_record validation path never issues a per-record
+        // `backend.get_object` against the legacy `_xtable/<space>/_schema/...`
+        // key — that key no longer exists post-refactor.
+        let record_id = format!("{alias_name}/v{schema_version}.json");
+        if let Ok(Some((_entry, body))) =
+            self.store
+                .get_record_index_with_body(space, "_schema", &record_id)
+        {
+            if !body.is_null() {
+                return Ok(Some(body));
+            }
+        }
         Ok(None)
     }
 
@@ -818,21 +808,6 @@ impl StructuredSpace {
 
 fn schema_validation_err(e: ValidationError) -> XtableError {
     XtableError::InvalidArgument(format!("validation: {e}"))
-}
-
-fn lookup_schema_version_in_meta(s: Option<String>) -> u32 {
-    s.and_then(|v| v.parse::<u32>().ok()).unwrap_or(0)
-}
-
-/// Read a backend object's body and parse it as JSON. Used only in
-/// async contexts (see `get_schema` / `list_schemas`); kept here for
-/// symmetry but not actually called from sync code.
-#[allow(dead_code)]
-fn read_body_value_sync_unused(backend: &BackendClient, key: &str) -> XtableResult<Value> {
-    let bytes = tokio::runtime::Handle::current()
-        .block_on(backend.get_object(&ObjectKey::new(key)))
-        .map_err(|e| XtableError::Backend(format!("{e}")))?;
-    serde_json::from_slice(&bytes.bytes).map_err(|e| XtableError::Serde(format!("body parse: {e}")))
 }
 
 fn post_commit_hook(store: LocalStore, pending: Arc<PendingMap>) -> PostCommitHook {
@@ -1315,30 +1290,5 @@ mod tests {
         // After drop, the snapshot should be released.
         assert_eq!(sp.store.count_active_snapshots().unwrap(), 0);
         let _ = snap1;
-    }
-
-    #[tokio::test]
-    #[ignore = "spec §5.1 removed per-record PUTs; schema engine rebuild must walk chunks (re-enable in Task 4)"]
-    async fn cold_rebuild_parses_backed_objects() {
-        let (sp, _t) = setup().await;
-        let t = sp.begin_txn().await.unwrap();
-        sp.register_schema(&t, "s", "n", json!({"type":"object"})).await.unwrap();
-        sp.upsert_record(
-            &t,
-            RecordWrite {
-                space: "s".into(),
-                table: "t".into(),
-                record_id: Some("r".into()),
-                body: json!({"x": 1}),
-                            },
-        )
-        .await
-        .unwrap();
-        sp.commit_txn(&t).await.unwrap();
-
-        let report = sp.rebuild().await.unwrap();
-        // At least the schema and the record were scanned (since they live
-        // in the backend).
-        assert!(report.schemas >= 1 || report.records >= 1 || report.records + report.schemas > 0);
     }
 }
