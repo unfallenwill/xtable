@@ -19,7 +19,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use tempfile::TempDir;
 
-use xtable_backend::recording::RecordingBackend;
+use xtable_storage::test_helpers::recording::RecordingBackend;
 use xtable_storage::{
     test_helpers::{flush_to_chunks, rotate_for_test},
     FlushPolicy, LocalStore, MemEntry, MemTable, MemTableSet, RecordValue,
@@ -123,9 +123,7 @@ async fn flush_chunk_s3_key_uses_real_space_and_table() {
     // No chunk key may have the legacy `_xtable///shard/...` shape,
     // i.e. a `_xtable/` followed by `/` (an empty segment) right away.
     let legacy = chunk_keys.iter().any(|k| {
-        k.starts_with("_xtable//")
-            || k.starts_with("_xtable///")
-            || k.contains("/__xtable/")
+        k.starts_with("_xtable//") || k.starts_with("_xtable///") || k.contains("/__xtable/")
     });
     assert!(
         !legacy,

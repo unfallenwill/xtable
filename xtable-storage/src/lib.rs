@@ -19,19 +19,21 @@ pub mod version_chain;
 pub mod version_index;
 pub mod wal;
 
-pub use chunk::{ChunkEntry, ChunkFooter, ChunkHeader, ChunkIndexEntry, ChunkWriter, KeyIndexEntry};
+pub use chunk::{
+    ChunkEntry, ChunkFooter, ChunkHeader, ChunkIndexEntry, ChunkWriter, KeyIndexEntry,
+};
 pub use locks::{
-    EdgeDirection, InEdgeSummary, PeerAction, RecentlyCommittedTxn, RECENT_WINDOW, SIEdge,
-    SIEdgeSet, SIReadLock, SIWriteLock, SiTxnLocks, SiTxnPhase,
+    EdgeDirection, InEdgeSummary, PeerAction, RecentlyCommittedTxn, SIEdge, SIEdgeSet, SIReadLock,
+    SIWriteLock, SiTxnLocks, SiTxnPhase, RECENT_WINDOW,
 };
 pub use memtable::{
-    MemEntry, MemTable, MemTableSet, RecordKey, RecordValue, FlushPolicy, SerializedEntry,
+    FlushPolicy, MemEntry, MemTable, MemTableSet, RecordKey, RecordValue, SerializedEntry,
     INVISIBLE,
 };
 pub use store::LocalStore;
 pub use txn_state::{
-    BlobRecord, MultipartState, RecordIndexEntry, SchemaIndexEntry, StoredRecord,
-    TxnStateRecord, WriteSetEntry,
+    BlobRecord, MultipartState, RecordIndexEntry, SchemaIndexEntry, StoredRecord, TxnStateRecord,
+    WriteSetEntry,
 };
 pub use version_chain::{VersionChain, VersionEntry};
 pub use version_index::VersionRecord;
@@ -86,4 +88,10 @@ pub mod test_helpers {
     /// `xtable_storage::flush` directly (which would couple them to
     /// production-only flush internals).
     pub use crate::flush::flush_one;
+
+    /// In-process recording backend for tests that need to assert
+    /// call counts (e.g. "commit did NOT issue per-record put_object
+    /// calls"). Re-homed here from `xtable-backend` to keep test-only
+    /// helpers out of the production crate's public surface.
+    pub mod recording;
 }

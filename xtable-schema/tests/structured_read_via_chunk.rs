@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 //! Structured read path goes through the LSM chunk, not per-record S3
 //! (spec §5.2).
 //!
@@ -17,10 +18,8 @@ use std::sync::Arc;
 use serde_json::json;
 use tempfile::TempDir;
 
-use xtable_backend::recording::RecordingBackend;
-use xtable_schema::{
-    RecordWrite, StructuredSpace, StructuredTxn,
-};
+use xtable_schema::{RecordWrite, StructuredSpace, StructuredTxn};
+use xtable_storage::test_helpers::recording::RecordingBackend;
 use xtable_storage::{
     test_helpers::{flush_to_chunks, rotate_for_test},
     LocalStore,

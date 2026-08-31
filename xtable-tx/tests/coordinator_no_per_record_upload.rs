@@ -13,8 +13,8 @@
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use xtable_backend::recording::RecordingBackend;
 use xtable_core::ObjectKey;
+use xtable_storage::test_helpers::recording::RecordingBackend;
 use xtable_storage::{LocalStore, MemTableSet};
 use xtable_tx::TxnCoordinator;
 
@@ -65,10 +65,16 @@ async fn commit_does_not_put_object_per_record() {
 
     // No get/delete either — the commit path no longer fetches staging
     // copies or deletes them.
-    assert_eq!(recording.counters.get_object_calls(), 0,
-        "commit must not issue any get_object");
-    assert_eq!(recording.counters.delete_object_calls(), 0,
-        "commit must not issue any delete_object");
+    assert_eq!(
+        recording.counters.get_object_calls(),
+        0,
+        "commit must not issue any get_object"
+    );
+    assert_eq!(
+        recording.counters.delete_object_calls(),
+        0,
+        "commit must not issue any delete_object"
+    );
 
     // The entry IS in the MemTable — that is the new single writer.
     // PR #4: the memtable key strips the `.json` suffix on the record

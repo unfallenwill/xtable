@@ -27,8 +27,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
 
-use crate::client::BackendClient;
-use crate::mock::MockS3;
+use xtable_backend::mock::MockS3;
+use xtable_backend::BackendClient;
 
 /// Public atomic counters for the recording backend. Inspect these
 /// after exercising the system under test.
@@ -162,7 +162,10 @@ async fn recording_handler(
                     meta.insert(name, v.to_str().unwrap_or_default().to_string());
                 }
             }
-            mock.objects.lock().unwrap().insert(key.clone(), body.to_vec());
+            mock.objects
+                .lock()
+                .unwrap()
+                .insert(key.clone(), body.to_vec());
             mock.meta.lock().unwrap().insert(key.clone(), meta);
             let etag = format!("\"recording-etag-{}\"", key);
             (StatusCode::OK, [("ETag", etag)]).into_response()
@@ -176,13 +179,23 @@ async fn recording_handler(
                 keys.sort();
                 let xml = format!(
                     r#"<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><IsTruncated>false</IsTruncated>{}</ListBucketResult>"#,
-                    keys.iter().map(|k| format!("<Contents><Key>{}</Key><Size>{}</Size><ETag>\"e\"</ETag></Contents>", k, objs.get(k).map(|v| v.len()).unwrap_or(0))).collect::<Vec<_>>().join("")
+                    keys.iter()
+                        .map(|k| format!(
+                            "<Contents><Key>{}</Key><Size>{}</Size><ETag>\"e\"</ETag></Contents>",
+                            k,
+                            objs.get(k).map(|v| v.len()).unwrap_or(0)
+                        ))
+                        .collect::<Vec<_>>()
+                        .join("")
                 );
-                return (StatusCode::OK, [("content-type", "application/xml")], xml).into_response();
+                return (StatusCode::OK, [("content-type", "application/xml")], xml)
+                    .into_response();
             }
             let objs = mock.objects.lock().unwrap();
             match objs.get(&key) {
-                Some(bytes) => (StatusCode::OK, axum::body::Body::from(bytes.clone())).into_response(),
+                Some(bytes) => {
+                    (StatusCode::OK, axum::body::Body::from(bytes.clone())).into_response()
+                }
                 None => (StatusCode::NOT_FOUND, "not found").into_response(),
             }
         }

@@ -4155,6 +4155,7 @@ dependencies = [
 name = "xtable-storage"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "bincode",
  "bytes",
  "chrono",

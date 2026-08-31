@@ -15,8 +15,8 @@ use std::sync::Arc;
 use serde_json::json;
 use tempfile::TempDir;
 
-use xtable_backend::recording::RecordingBackend;
 use xtable_schema::StructuredSpace;
+use xtable_storage::test_helpers::recording::RecordingBackend;
 use xtable_storage::{
     read::read_at_snapshot,
     test_helpers::{flush_to_chunks, rotate_for_test},
