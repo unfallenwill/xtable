@@ -21,12 +21,14 @@ pub const TBL_VERSIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("xta
 
 /// `version_chains`: object_key (UTF-8) → bincode-encoded VersionChain bytes.
 /// MVCC: per-key chain of versions, sorted by commit_version ascending.
-pub const TBL_VERSION_CHAINS: TableDefinition<&str, &[u8]> = TableDefinition::new("xtable.version_chains");
+pub const TBL_VERSION_CHAINS: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("xtable.version_chains");
 
 /// `active_snapshots`: snapshot_version (u64) → ref-count (u64).
 /// V9 fix: ref-count so multiple txns sharing a snapshot don't accidentally
 /// release the pin when the first one commits.
-pub const TBL_ACTIVE_SNAPSHOTS: TableDefinition<u64, u64> = TableDefinition::new("xtable.active_snapshots");
+pub const TBL_ACTIVE_SNAPSHOTS: TableDefinition<u64, u64> =
+    TableDefinition::new("xtable.active_snapshots");
 
 /// `meta`: singleton bookkeeping keys (string) → u64 value.
 pub const TBL_META: TableDefinition<&str, u64> = TableDefinition::new("xtable.meta");
@@ -38,10 +40,12 @@ pub const TBL_WAL: TableDefinition<u64, &[u8]> = TableDefinition::new("xtable.wa
 pub const TBL_TXN_STATE: TableDefinition<&str, &[u8]> = TableDefinition::new("xtable.txn_state");
 
 /// `write_set`: (txn_id, key) → bincode WriteSetEntry.
-pub const TBL_WRITE_SET: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("xtable.write_set");
+pub const TBL_WRITE_SET: TableDefinition<(&str, &str), &[u8]> =
+    TableDefinition::new("xtable.write_set");
 
 /// `staged_blobs`: body_handle → bincode BlobRecord.
-pub const TBL_STAGED_BLOBS: TableDefinition<&str, &[u8]> = TableDefinition::new("xtable.staged_blobs");
+pub const TBL_STAGED_BLOBS: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("xtable.staged_blobs");
 
 /// `multipart`: upload_id → bincode MultipartState.
 pub const TBL_MULTIPART: TableDefinition<&str, &[u8]> = TableDefinition::new("xtable.multipart");
@@ -99,8 +103,7 @@ pub const TBL_SI_IN_EDGES_BY_TJ: TableDefinition<(&str, &str), &[u8]> =
 /// `si_recent`: commit_version → bincode RecentlyCommittedTxn.
 /// Bounded retention: GC drops entries whose version <
 /// global_version - WINDOW.
-pub const TBL_SI_RECENT: TableDefinition<u64, &[u8]> =
-    TableDefinition::new("xtable.si_recent");
+pub const TBL_SI_RECENT: TableDefinition<u64, &[u8]> = TableDefinition::new("xtable.si_recent");
 
 /// `si_edges`: (owning_txn_id, direction, peer_txn_id, key) → bincode
 /// SIEdge. `direction` is "in" or "out". Diagnostics + cycle traversal.

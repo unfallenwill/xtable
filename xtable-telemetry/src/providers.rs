@@ -9,7 +9,9 @@ use anyhow::Context;
 use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::logs::LoggerProvider as SdkLoggerProvider;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
-use opentelemetry_sdk::trace::{BatchConfigBuilder, BatchSpanProcessor, TracerProvider as SdkTracerProvider};
+use opentelemetry_sdk::trace::{
+    BatchConfigBuilder, BatchSpanProcessor, TracerProvider as SdkTracerProvider,
+};
 use opentelemetry_sdk::Resource;
 
 use crate::config::{OtlpProtocol, TelemetryConfig};

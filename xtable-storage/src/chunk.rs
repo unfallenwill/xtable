@@ -110,7 +110,13 @@ pub struct ChunkHeader {
 }
 
 impl ChunkHeader {
-    #[tracing::instrument(level = "info", name = "chunk.encode", skip_all, fields(op = "chunk.encode"), err)]
+    #[tracing::instrument(
+        level = "info",
+        name = "chunk.encode",
+        skip_all,
+        fields(op = "chunk.encode"),
+        err
+    )]
     pub fn encode(&self) -> XtableResult<Vec<u8>> {
         let _timed = Timed::new(
             &metrics().chunk_upload_duration,
@@ -141,7 +147,13 @@ impl ChunkHeader {
     }
 
     /// Parse a header from the start of `buf`. Returns `(header, body_offset)`.
-    #[tracing::instrument(level = "info", name = "chunk.decode", skip_all, fields(op = "chunk.decode"), err)]
+    #[tracing::instrument(
+        level = "info",
+        name = "chunk.decode",
+        skip_all,
+        fields(op = "chunk.decode"),
+        err
+    )]
     pub fn decode(buf: &[u8]) -> XtableResult<(Self, usize)> {
         let _timed = Timed::new(
             &metrics().chunk_download_duration,
@@ -268,8 +280,8 @@ impl ChunkFooter {
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&(self.bloom.len() as u32).to_le_bytes());
         buf.extend_from_slice(&self.bloom);
-        let ki_bytes = bincode::serialize(&self.key_index)
-            .map_err(xtable_core::XtableError::from)?;
+        let ki_bytes =
+            bincode::serialize(&self.key_index).map_err(xtable_core::XtableError::from)?;
         buf.extend_from_slice(&(ki_bytes.len() as u32).to_le_bytes());
         buf.extend_from_slice(&ki_bytes);
         buf.extend_from_slice(&self.body_crc32c.to_le_bytes());
@@ -371,18 +383,24 @@ fn encode_entry_into(buf: &mut BytesMut, e: &ChunkEntry) -> XtableResult<()> {
     }
     buf.put_u8(flags);
     // CRC32C over the entry payload (everything we just wrote).
-    let payload_start = buf.len() - (key_bytes.len() + 2 + e.value.len() + 4 + 1 + ct.len()
-        + 1
-        + e.user_meta
-            .iter()
-            .map(|(k, v)| 1 + k.len() + 1 + v.len())
-            .sum::<usize>()
-        + 4
-        + 1
-        + txn_bytes.len()
-        + 8
-        + 8
-        + 1);
+    let payload_start = buf.len()
+        - (key_bytes.len()
+            + 2
+            + e.value.len()
+            + 4
+            + 1
+            + ct.len()
+            + 1
+            + e.user_meta
+                .iter()
+                .map(|(k, v)| 1 + k.len() + 1 + v.len())
+                .sum::<usize>()
+            + 4
+            + 1
+            + txn_bytes.len()
+            + 8
+            + 8
+            + 1);
     let crc = crc32fast::hash(&buf[payload_start..]);
     buf.extend_from_slice(&crc.to_le_bytes());
     Ok(())
@@ -534,18 +552,8 @@ impl ChunkWriter {
             uncompressed_len,
             space: self.space.clone(),
             table: self.table.clone(),
-            key_min: self
-                .keys
-                .iter()
-                .min()
-                .cloned()
-                .unwrap_or_default(),
-            key_max: self
-                .keys
-                .iter()
-                .max()
-                .cloned()
-                .unwrap_or_default(),
+            key_min: self.keys.iter().min().cloned().unwrap_or_default(),
+            key_max: self.keys.iter().max().cloned().unwrap_or_default(),
             record_count: self.entries.len() as u64,
         };
         let footer = ChunkFooter {
@@ -698,12 +706,9 @@ mod tests {
         assert_eq!(entries[9].record_id, "r9");
         assert_eq!(entries[0].commit_version, 1);
         // Footer round-trip (PR-Fix11 layout: file ends with footer_bytes +
-// standalone footer_len u32; FOOTER_MAGIC is embedded inside footer_bytes)
-        let footer_len = u32::from_le_bytes(
-            file[file.len() - 4..file.len()]
-                .try_into()
-                .unwrap(),
-        ) as usize;
+        // standalone footer_len u32; FOOTER_MAGIC is embedded inside footer_bytes)
+        let footer_len =
+            u32::from_le_bytes(file[file.len() - 4..file.len()].try_into().unwrap()) as usize;
         let footer_bytes = &file[file.len() - 4 - footer_len..file.len() - 4];
         let _ = ChunkFooter::decode(footer_bytes).unwrap();
     }
@@ -820,8 +825,9 @@ mod tests {
         );
         // Round-trip the footer decode.
         let footer_start_outer = footer_start;
-        let decoded_footer = ChunkFooter::decode(&file[footer_start_outer..footer_start_outer + footer_len])
-            .expect("footer decode");
+        let decoded_footer =
+            ChunkFooter::decode(&file[footer_start_outer..footer_start_outer + footer_len])
+                .expect("footer decode");
         assert_eq!(decoded_footer.body_crc32c, footer.body_crc32c);
         assert_eq!(decoded_footer.bloom, footer.bloom);
         assert_eq!(decoded_footer.key_index, footer.key_index);

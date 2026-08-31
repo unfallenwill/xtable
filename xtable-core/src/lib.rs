@@ -4,8 +4,8 @@
 
 pub mod config;
 pub mod error;
-pub mod ids;
 pub mod headers;
+pub mod ids;
 
 pub use error::{XtableError, XtableResult};
 pub use ids::{ObjectKey, TxnId, Version};

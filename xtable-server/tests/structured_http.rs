@@ -26,12 +26,21 @@ async fn test_app() -> (axum::Router, TempDir) {
     let store = LocalStore::open(&cfg.storage.redb_dir).unwrap();
     let backend = BackendClient::dummy_for_test_async().await.unwrap();
     let creds = Arc::new(CredentialStore::new());
-    creds.put(StaticCredential {
-        access_key_id: "test".into(),
-        secret_access_key: "test".into(),
-    }.into_entry());
+    creds.put(
+        StaticCredential {
+            access_key_id: "test".into(),
+            secret_access_key: "test".into(),
+        }
+        .into_entry(),
+    );
 
-    let state = AppState::new(cfg, store, backend, creds, xtable_telemetry::metrics::Metrics::default());
+    let state = AppState::new(
+        cfg,
+        store,
+        backend,
+        creds,
+        xtable_telemetry::metrics::Metrics::default(),
+    );
     let app = xtable_server::structured::router().with_state(Arc::new(state));
     (app, tmp)
 }
@@ -41,7 +50,9 @@ fn json_body(v: Value) -> Body {
 }
 
 async fn read_json(resp: axum::response::Response) -> Value {
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     serde_json::from_slice(&bytes).unwrap_or(Value::Null)
 }
 
@@ -129,7 +140,11 @@ async fn upsert_invalid_body_rejected_400() {
         })))
         .unwrap();
     let bind_resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(bind_resp.status(), StatusCode::NO_CONTENT, "bind should succeed");
+    assert_eq!(
+        bind_resp.status(),
+        StatusCode::NO_CONTENT,
+        "bind should succeed"
+    );
 
     // Upsert invalid.
     let req = Request::builder()
@@ -142,7 +157,11 @@ async fn upsert_invalid_body_rejected_400() {
         })))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "invalid body should be rejected");
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "invalid body should be rejected"
+    );
 }
 
 #[tokio::test]
@@ -262,7 +281,11 @@ async fn diff_returns_changed_records() {
 
     assert_ne!(snap1, snap2);
     let uri = format!("/v1/spaces/s/tables/t/diff?s1={}&s2={}", snap1, snap2);
-    let req = Request::builder().method("GET").uri(uri).body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .method("GET")
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = read_json(resp).await;
@@ -297,7 +320,10 @@ async fn list_schemas_returns_registered() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = read_json(resp).await;
     let schemas = body["schemas"].as_array().unwrap();
-    let names: Vec<&str> = schemas.iter().map(|s| s["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = schemas
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
     assert_eq!(names, vec!["a", "b"]);
 }
 
@@ -349,14 +375,18 @@ async fn get_schema_with_explicit_version() {
         .method("POST")
         .uri("/v1/spaces/s/schemas")
         .header("content-type", "application/json")
-        .body(json_body(json!({ "name": "n", "body": {"type":"object","required":["v"]} })))
+        .body(json_body(
+            json!({ "name": "n", "body": {"type":"object","required":["v"]} }),
+        ))
         .unwrap();
     let _ = app.clone().oneshot(req).await.unwrap();
     let req = Request::builder()
         .method("POST")
         .uri("/v1/spaces/s/schemas")
         .header("content-type", "application/json")
-        .body(json_body(json!({ "name": "n", "body": {"type":"object","required":["w"]} })))
+        .body(json_body(
+            json!({ "name": "n", "body": {"type":"object","required":["w"]} }),
+        ))
         .unwrap();
     let _ = app.clone().oneshot(req).await.unwrap();
 
@@ -369,7 +399,10 @@ async fn get_schema_with_explicit_version() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = read_json(resp).await;
     assert_eq!(body["version"], 1);
-    assert!(body["body"]["required"].as_array().unwrap().contains(&json!("v")));
+    assert!(body["body"]["required"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("v")));
 }
 
 #[tokio::test]
@@ -507,7 +540,10 @@ async fn diff_with_missing_query_returns_400() {
     let resp = app.oneshot(req).await.unwrap();
     // Should still work: parse error. Actually with missing query params, axum returns 400.
     let s = resp.status();
-    assert!(s == StatusCode::BAD_REQUEST || s == StatusCode::INTERNAL_SERVER_ERROR, "unexpected {s}");
+    assert!(
+        s == StatusCode::BAD_REQUEST || s == StatusCode::INTERNAL_SERVER_ERROR,
+        "unexpected {s}"
+    );
 }
 
 #[tokio::test]
@@ -579,7 +615,9 @@ async fn query_filter_lt_le_geq() {
             .method("POST")
             .uri("/v1/spaces/s/tables/t/records")
             .header("content-type", "application/json")
-            .body(json_body(json!({ "record_id": format!("r{n}"), "body": {"n": n} })))
+            .body(json_body(
+                json!({ "record_id": format!("r{n}"), "body": {"n": n} }),
+            ))
             .unwrap();
         let _ = app.clone().oneshot(req).await.unwrap();
     }
@@ -651,7 +689,9 @@ async fn register_schema_non_object_body_returns_400() {
         .method("POST")
         .uri("/v1/spaces/s/schemas")
         .header("content-type", "application/json")
-        .body(json_body(json!({ "name": "n", "body": ["array", "not", "object"] })))
+        .body(json_body(
+            json!({ "name": "n", "body": ["array", "not", "object"] }),
+        ))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -677,7 +717,9 @@ async fn upsert_no_schema_returns_success() {
         .method("POST")
         .uri("/v1/spaces/s/tables/t/records")
         .header("content-type", "application/json")
-        .body(json_body(json!({ "record_id": "r", "body": { "anything": "goes" } })))
+        .body(json_body(
+            json!({ "record_id": "r", "body": { "anything": "goes" } }),
+        ))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);

@@ -30,20 +30,43 @@ pub struct Record {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Filter {
     /// Body equals the given JSON value exactly.
-    Eq { field: String, value: Value },
+    Eq {
+        field: String,
+        value: Value,
+    },
     /// Body does NOT equal the given JSON value.
-    Ne { field: String, value: Value },
+    Ne {
+        field: String,
+        value: Value,
+    },
     /// Field is greater than the given value. Numbers / strings compared
     /// with their natural ordering.
-    Gt { field: String, value: Value },
+    Gt {
+        field: String,
+        value: Value,
+    },
     /// Field is greater than or equal.
-    Ge { field: String, value: Value },
-    Lt { field: String, value: Value },
-    Le { field: String, value: Value },
+    Ge {
+        field: String,
+        value: Value,
+    },
+    Lt {
+        field: String,
+        value: Value,
+    },
+    Le {
+        field: String,
+        value: Value,
+    },
     /// Field value contains the substring (string fields only).
-    Contains { field: String, value: String },
+    Contains {
+        field: String,
+        value: String,
+    },
     /// `field` exists in the body.
-    Exists { field: String },
+    Exists {
+        field: String,
+    },
 }
 
 impl Filter {
@@ -52,12 +75,16 @@ impl Filter {
         match self {
             Self::Eq { field, value } => lookup(body, field) == Some(value),
             Self::Ne { field, value } => lookup(body, field).map_or(true, |v| v != value),
-            Self::Gt { field, value } => lookup(body, field).map_or(false, |v| cmp(&v, value) == std::cmp::Ordering::Greater),
+            Self::Gt { field, value } => {
+                lookup(body, field).map_or(false, |v| cmp(&v, value) == std::cmp::Ordering::Greater)
+            }
             Self::Ge { field, value } => matches!(
                 lookup(body, field).map(|v| cmp(&v, value)),
                 Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
             ),
-            Self::Lt { field, value } => lookup(body, field).map_or(false, |v| cmp(&v, value) == std::cmp::Ordering::Less),
+            Self::Lt { field, value } => {
+                lookup(body, field).map_or(false, |v| cmp(&v, value) == std::cmp::Ordering::Less)
+            }
             Self::Le { field, value } => matches!(
                 lookup(body, field).map(|v| cmp(&v, value)),
                 Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
@@ -113,7 +140,10 @@ impl Query {
     }
 
     pub fn order(mut self, field: impl Into<String>, dir: OrderDir) -> Self {
-        self.order_by = Some(OrderBy { field: field.into(), dir });
+        self.order_by = Some(OrderBy {
+            field: field.into(),
+            dir,
+        });
         self
     }
 
@@ -228,7 +258,10 @@ mod tests {
 
     #[test]
     fn eq_filter() {
-        let q = Query::new().filter(Filter::Eq { field: "status".into(), value: json!("open") });
+        let q = Query::new().filter(Filter::Eq {
+            field: "status".into(),
+            value: json!("open"),
+        });
         let rs = vec![
             rec("a", json!({"status":"open"})),
             rec("b", json!({"status":"closed"})),
@@ -241,8 +274,14 @@ mod tests {
     #[test]
     fn range_filter() {
         let q = Query::new()
-            .filter(Filter::Ge { field: "n".into(), value: json!(10) })
-            .filter(Filter::Lt { field: "n".into(), value: json!(20) });
+            .filter(Filter::Ge {
+                field: "n".into(),
+                value: json!(10),
+            })
+            .filter(Filter::Lt {
+                field: "n".into(),
+                value: json!(20),
+            });
         let rs = vec![
             rec("a", json!({"n": 5})),
             rec("b", json!({"n": 10})),
@@ -262,29 +301,48 @@ mod tests {
             rec("c", json!({"n": 2})),
         ];
         let asc = Query::new().order("n", OrderDir::Asc).run(&rs);
-        assert_eq!(asc.iter().map(|r| r.record_id.as_str()).collect::<Vec<_>>(), vec!["b", "c", "a"]);
+        assert_eq!(
+            asc.iter().map(|r| r.record_id.as_str()).collect::<Vec<_>>(),
+            vec!["b", "c", "a"]
+        );
         let desc = Query::new().order("n", OrderDir::Desc).run(&rs);
-        assert_eq!(desc.iter().map(|r| r.record_id.as_str()).collect::<Vec<_>>(), vec!["a", "c", "b"]);
+        assert_eq!(
+            desc.iter()
+                .map(|r| r.record_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "c", "b"]
+        );
     }
 
     #[test]
     fn limit_and_offset() {
-        let rs: Vec<_> = (0..10).map(|i| rec(&format!("r{i}"), json!({"i": i}))).collect();
+        let rs: Vec<_> = (0..10)
+            .map(|i| rec(&format!("r{i}"), json!({"i": i})))
+            .collect();
         let q = Query::new().order("i", OrderDir::Asc).offset(3).limit(2);
         let out = q.run(&rs);
-        assert_eq!(out.iter().map(|r| r.record_id.as_str()).collect::<Vec<_>>(), vec!["r3", "r4"]);
+        assert_eq!(
+            out.iter().map(|r| r.record_id.as_str()).collect::<Vec<_>>(),
+            vec!["r3", "r4"]
+        );
     }
 
     #[test]
     fn contains_filter() {
-        let q = Query::new().filter(Filter::Contains { field: "name".into(), value: "al".into() });
+        let q = Query::new().filter(Filter::Contains {
+            field: "name".into(),
+            value: "al".into(),
+        });
         let rs = vec![
             rec("a", json!({"name": "alice"})),
             rec("b", json!({"name": "bob"})),
             rec("c", json!({"name": "calvin"})),
         ];
         let out = q.run(&rs);
-        assert_eq!(out.iter().map(|r| r.record_id.as_str()).collect::<Vec<_>>(), vec!["a", "c"]);
+        assert_eq!(
+            out.iter().map(|r| r.record_id.as_str()).collect::<Vec<_>>(),
+            vec!["a", "c"]
+        );
     }
 
     #[test]
@@ -298,7 +356,10 @@ mod tests {
 
     #[test]
     fn nested_field_lookup() {
-        let q = Query::new().filter(Filter::Eq { field: "meta.x".into(), value: json!(1) });
+        let q = Query::new().filter(Filter::Eq {
+            field: "meta.x".into(),
+            value: json!(1),
+        });
         let rs = vec![rec("a", json!({"meta": {"x": 1, "y": 2}}))];
         assert_eq!(q.run(&rs).len(), 1);
     }
@@ -306,38 +367,50 @@ mod tests {
     #[test]
     fn exists_filter() {
         let q = Query::new().filter(Filter::Exists { field: "k".into() });
-        let rs = vec![
-            rec("a", json!({"k": 1})),
-            rec("b", json!({})),
-        ];
+        let rs = vec![rec("a", json!({"k": 1})), rec("b", json!({}))];
         assert_eq!(q.run(&rs).len(), 1);
     }
 
     #[test]
     fn missing_field_returns_false_for_range() {
-        let q = Query::new().filter(Filter::Gt { field: "x".into(), value: json!(5) });
+        let q = Query::new().filter(Filter::Gt {
+            field: "x".into(),
+            value: json!(5),
+        });
         let rs = vec![rec("a", json!({}))];
         assert_eq!(q.run(&rs).len(), 0);
     }
 
     #[test]
     fn ne_filter() {
-        let q = Query::new().filter(Filter::Ne { field: "n".into(), value: json!(1) });
+        let q = Query::new().filter(Filter::Ne {
+            field: "n".into(),
+            value: json!(1),
+        });
         let rs = vec![rec("a", json!({"n": 1})), rec("b", json!({"n": 2}))];
         assert_eq!(q.run(&rs).len(), 1);
     }
 
     #[test]
     fn gt_filter() {
-        let q = Query::new().filter(Filter::Gt { field: "n".into(), value: json!(5) });
+        let q = Query::new().filter(Filter::Gt {
+            field: "n".into(),
+            value: json!(5),
+        });
         let rs = vec![rec("a", json!({"n": 5})), rec("b", json!({"n": 6}))];
         assert_eq!(q.run(&rs).len(), 1);
     }
 
     #[test]
     fn lt_and_le_filters() {
-        let q1 = Query::new().filter(Filter::Lt { field: "n".into(), value: json!(10) });
-        let q2 = Query::new().filter(Filter::Le { field: "n".into(), value: json!(10) });
+        let q1 = Query::new().filter(Filter::Lt {
+            field: "n".into(),
+            value: json!(10),
+        });
+        let q2 = Query::new().filter(Filter::Le {
+            field: "n".into(),
+            value: json!(10),
+        });
         let rs = vec![rec("a", json!({"n": 10})), rec("b", json!({"n": 9}))];
         assert_eq!(q1.run(&rs).len(), 1); // b
         assert_eq!(q2.run(&rs).len(), 2);
@@ -346,8 +419,14 @@ mod tests {
     #[test]
     fn filter_join_with_and() {
         let q = Query::new()
-            .filter(Filter::Eq { field: "a".into(), value: json!(1) })
-            .filter(Filter::Eq { field: "b".into(), value: json!(2) });
+            .filter(Filter::Eq {
+                field: "a".into(),
+                value: json!(1),
+            })
+            .filter(Filter::Eq {
+                field: "b".into(),
+                value: json!(2),
+            });
         let rs = vec![
             rec("p", json!({"a": 1, "b": 2})),
             rec("q", json!({"a": 1, "b": 3})),
@@ -374,14 +453,20 @@ mod tests {
 
     #[test]
     fn nested_array_lookup() {
-        let q = Query::new().filter(Filter::Eq { field: "arr.0".into(), value: json!(1) });
+        let q = Query::new().filter(Filter::Eq {
+            field: "arr.0".into(),
+            value: json!(1),
+        });
         let rs = vec![rec("a", json!({"arr": [1, 2, 3]}))];
         assert_eq!(q.run(&rs).len(), 1);
     }
 
     #[test]
     fn cmp_handles_mixed_types_with_default_eq() {
-        let q = Query::new().filter(Filter::Eq { field: "v".into(), value: json!("x") });
+        let q = Query::new().filter(Filter::Eq {
+            field: "v".into(),
+            value: json!("x"),
+        });
         let rs = vec![rec("a", json!({"v": 1}))]; // number != string but eq uses ==
         assert_eq!(q.run(&rs).len(), 0);
     }

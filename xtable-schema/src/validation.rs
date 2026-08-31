@@ -107,7 +107,10 @@ fn validate_inner(schema: &Value, value: &Value, path: &str) -> Result<(), Valid
         if match_count != 1 {
             return Err(ValidationError {
                 path: path.to_string(),
-                message: format!("`oneOf` must match exactly one schema (matched {})", match_count),
+                message: format!(
+                    "`oneOf` must match exactly one schema (matched {})",
+                    match_count
+                ),
             });
         }
     }
@@ -121,12 +124,10 @@ fn validate_inner(schema: &Value, value: &Value, path: &str) -> Result<(), Valid
                     // JSON Schema: integer satisfies "number"
                     || (s == "number" && actual == "integer")
             }
-            Value::Array(arr) => {
-                arr.iter().any(|v| {
-                    let wants = v.as_str().unwrap_or("");
-                    actual == wants || (wants == "number" && actual == "integer")
-                })
-            }
+            Value::Array(arr) => arr.iter().any(|v| {
+                let wants = v.as_str().unwrap_or("");
+                actual == wants || (wants == "number" && actual == "integer")
+            }),
             _ => false,
         };
         if !ok {
@@ -164,7 +165,11 @@ fn validate_inner(schema: &Value, value: &Value, path: &str) -> Result<(), Valid
     Ok(())
 }
 
-fn validate_object(schema: &Value, map: &serde_json::Map<String, Value>, path: &str) -> Result<(), ValidationError> {
+fn validate_object(
+    schema: &Value,
+    map: &serde_json::Map<String, Value>,
+    path: &str,
+) -> Result<(), ValidationError> {
     if let Some(req) = schema.get("required").and_then(|v| v.as_array()) {
         for r in req {
             if let Some(name) = r.as_str() {
@@ -273,7 +278,11 @@ fn validate_string(schema: &Value, s: &str, path: &str) -> Result<(), Validation
     Ok(())
 }
 
-fn validate_number(schema: &Value, n: &serde_json::Number, path: &str) -> Result<(), ValidationError> {
+fn validate_number(
+    schema: &Value,
+    n: &serde_json::Number,
+    path: &str,
+) -> Result<(), ValidationError> {
     let f = n.as_f64().ok_or_else(|| ValidationError {
         path: path.to_string(),
         message: "non-finite number".to_string(),
@@ -339,7 +348,9 @@ mod tests {
 
     #[test]
     fn validates_object_with_required_and_properties() {
-        let schema = s(r#"{"type":"object","required":["a"],"properties":{"a":{"type":"integer"},"b":{"type":"string"}}}"#);
+        let schema = s(
+            r#"{"type":"object","required":["a"],"properties":{"a":{"type":"integer"},"b":{"type":"string"}}}"#,
+        );
         assert!(validate(&schema, &json!({"a": 1})).is_ok());
         assert!(validate(&schema, &json!({"a": 1, "b": "x"})).is_ok());
         assert!(validate(&schema, &json!({})).is_err());
@@ -348,7 +359,9 @@ mod tests {
 
     #[test]
     fn additional_properties_false_rejects_unknown() {
-        let schema = s(r#"{"type":"object","properties":{"a":{"type":"integer"}},"additionalProperties":false}"#);
+        let schema = s(
+            r#"{"type":"object","properties":{"a":{"type":"integer"}},"additionalProperties":false}"#,
+        );
         assert!(validate(&schema, &json!({"a": 1})).is_ok());
         assert!(validate(&schema, &json!({"a": 1, "b": 2})).is_err());
     }
@@ -419,7 +432,9 @@ mod tests {
 
     #[test]
     fn nested_object_validated() {
-        let schema = s(r#"{"type":"object","properties":{"nested":{"type":"object","required":["x"],"properties":{"x":{"type":"integer"}}}}}"#);
+        let schema = s(
+            r#"{"type":"object","properties":{"nested":{"type":"object","required":["x"],"properties":{"x":{"type":"integer"}}}}}"#,
+        );
         assert!(validate(&schema, &json!({"nested": {"x": 1}})).is_ok());
         assert!(validate(&schema, &json!({"nested": {}})).is_err());
     }
@@ -468,7 +483,9 @@ mod tests {
 
     #[test]
     fn additional_properties_object_schema_validates_value() {
-        let schema = s(r#"{"type":"object","properties":{"a":{"type":"integer"}},"additionalProperties":{"type":"string"}}"#);
+        let schema = s(
+            r#"{"type":"object","properties":{"a":{"type":"integer"}},"additionalProperties":{"type":"string"}}"#,
+        );
         assert!(validate(&schema, &json!({"a": 1, "b": "ok"})).is_ok());
         assert!(validate(&schema, &json!({"a": 1, "b": 7})).is_err());
     }

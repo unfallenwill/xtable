@@ -30,7 +30,10 @@ pub fn sweep_stale_txns(store: &LocalStore, timeout_secs: i64) -> Result<usize, 
             .open_table(TBL_TXN_STATE)
             .map_err(|e| XtableError::Storage(e.to_string()))?;
         let mut out = Vec::new();
-        for entry in tbl.iter().map_err(|e| XtableError::Storage(e.to_string()))? {
+        for entry in tbl
+            .iter()
+            .map_err(|e| XtableError::Storage(e.to_string()))?
+        {
             let (k, v) = entry.map_err(|e| XtableError::Storage(e.to_string()))?;
             let rec: xtable_storage::TxnStateRecord =
                 bincode::deserialize(v.value()).map_err(XtableError::from)?;
@@ -108,8 +111,8 @@ pub struct CombinedSweep {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xtable_storage::{TxnStateRecord, VersionEntry};
     use tempfile::TempDir;
+    use xtable_storage::{TxnStateRecord, VersionEntry};
 
     #[test]
     fn sweep_aborts_stale_active_txn() {
@@ -139,9 +142,24 @@ mod tests {
         // With no active snapshots, gc_chains should drop all but newest.
         let tmp = TempDir::new().unwrap();
         let store = LocalStore::open_path(&tmp.path().join("xt.redb")).unwrap();
-        store.append_chain_entry("k", &VersionEntry::new(1, "e1".into(), "k".into(), "T1".into(), 10)).unwrap();
-        store.append_chain_entry("k", &VersionEntry::new(2, "e2".into(), "k".into(), "T2".into(), 20)).unwrap();
-        store.append_chain_entry("k", &VersionEntry::new(3, "e3".into(), "k".into(), "T3".into(), 30)).unwrap();
+        store
+            .append_chain_entry(
+                "k",
+                &VersionEntry::new(1, "e1".into(), "k".into(), "T1".into(), 10),
+            )
+            .unwrap();
+        store
+            .append_chain_entry(
+                "k",
+                &VersionEntry::new(2, "e2".into(), "k".into(), "T2".into(), 20),
+            )
+            .unwrap();
+        store
+            .append_chain_entry(
+                "k",
+                &VersionEntry::new(3, "e3".into(), "k".into(), "T3".into(), 30),
+            )
+            .unwrap();
         let (visited, removed) = gc_version_chains(&store).unwrap();
         assert_eq!(visited, 1);
         assert_eq!(removed, 2);
@@ -156,9 +174,24 @@ mod tests {
         // with commit_version >= 2 even though no readers are "actively using it".
         let tmp = TempDir::new().unwrap();
         let store = LocalStore::open_path(&tmp.path().join("xt.redb")).unwrap();
-        store.append_chain_entry("k", &VersionEntry::new(1, "e1".into(), "k".into(), "T1".into(), 10)).unwrap();
-        store.append_chain_entry("k", &VersionEntry::new(2, "e2".into(), "k".into(), "T2".into(), 20)).unwrap();
-        store.append_chain_entry("k", &VersionEntry::new(3, "e3".into(), "k".into(), "T3".into(), 30)).unwrap();
+        store
+            .append_chain_entry(
+                "k",
+                &VersionEntry::new(1, "e1".into(), "k".into(), "T1".into(), 10),
+            )
+            .unwrap();
+        store
+            .append_chain_entry(
+                "k",
+                &VersionEntry::new(2, "e2".into(), "k".into(), "T2".into(), 20),
+            )
+            .unwrap();
+        store
+            .append_chain_entry(
+                "k",
+                &VersionEntry::new(3, "e3".into(), "k".into(), "T3".into(), 30),
+            )
+            .unwrap();
         store.register_snapshot(2).unwrap();
         let (_, removed) = gc_version_chains(&store).unwrap();
         // min_active = 2; only entry with commit_version < 2 (=1) drops.

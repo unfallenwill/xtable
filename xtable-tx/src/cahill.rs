@@ -76,14 +76,20 @@ mod tests {
     fn no_in_edges_no_cycle() {
         let in_edges = edge_set(vec![]);
         let out_edges = edge_set(vec![edge("T2", PeerAction::Read, "k", 5)]);
-        assert_eq!(detect_dangerous_structure("T1", &in_edges, &out_edges), None);
+        assert_eq!(
+            detect_dangerous_structure("T1", &in_edges, &out_edges),
+            None
+        );
     }
 
     #[test]
     fn no_out_edges_no_cycle() {
         let in_edges = edge_set(vec![edge("T2", PeerAction::Wrote, "k", 5)]);
         let out_edges = edge_set(vec![]);
-        assert_eq!(detect_dangerous_structure("T1", &in_edges, &out_edges), None);
+        assert_eq!(
+            detect_dangerous_structure("T1", &in_edges, &out_edges),
+            None
+        );
     }
 
     #[test]

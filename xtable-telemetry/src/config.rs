@@ -69,8 +69,8 @@ pub fn load_from_env() -> Option<TelemetryConfig> {
     let profile_str = std::env::var("OTEL_PROFILE").unwrap_or_else(|_| "production".into());
     let profile = Profile::from_str(&profile_str).unwrap_or(Profile::Production);
     let service_name = std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "xtable".into());
-    let service_instance_id = std::env::var("OTEL_SERVICE_INSTANCE_ID")
-        .unwrap_or_else(|_| ulid::Ulid::new().to_string());
+    let service_instance_id =
+        std::env::var("OTEL_SERVICE_INSTANCE_ID").unwrap_or_else(|_| ulid::Ulid::new().to_string());
     let environment = std::env::var("XTABLE_ENV").unwrap_or_else(|_| "dev".into());
     let trace_sample_ratio = std::env::var("OTEL_TRACES_SAMPLER_ARG")
         .ok()

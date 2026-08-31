@@ -32,12 +32,10 @@ impl BodyHandle {
     }
 
     pub fn len(&self) -> usize {
-        self.inline.as_ref().map(|v| v.len()).unwrap_or_else(|| {
-            self.spilled
-                .as_ref()
-                .map(|s| s.size as usize)
-                .unwrap_or(0)
-        })
+        self.inline
+            .as_ref()
+            .map(|v| v.len())
+            .unwrap_or_else(|| self.spilled.as_ref().map(|s| s.size as usize).unwrap_or(0))
     }
 
     pub fn is_empty(&self) -> bool {

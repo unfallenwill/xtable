@@ -63,7 +63,7 @@ pub struct MultipartState {
     pub key: String,
     pub backend_upload_id: String,
     pub parts: Vec<(i32, String, u64)>, // (part_number, etag, size)
-    pub txn_id: Option<String>,        // None = non-transactional
+    pub txn_id: Option<String>,         // None = non-transactional
 }
 
 /// Record index entry — used by structured-data-space to enumerate records

@@ -36,7 +36,11 @@ impl std::fmt::Debug for EdgeAuth {
 /// signature in the query string.
 pub fn is_anonymous<B>(req: &http::Request<B>) -> bool {
     !req.headers().contains_key("authorization")
-        && !req.uri().query().map(|q| q.contains("X-Amz-Signature=")).unwrap_or(false)
+        && !req
+            .uri()
+            .query()
+            .map(|q| q.contains("X-Amz-Signature="))
+            .unwrap_or(false)
 }
 
 /// Extract the access key id from a SigV4 Authorization header value, if any.
@@ -167,8 +171,10 @@ pub fn verify_sigv4_signature<B>(
 
     let date_short = &date[..8];
     let scope = format!("{}/{}/s3/aws4_request", date_short, region);
-    let string_to_sign =
-        format!("AWS4-HMAC-SHA256\n{}\n{}\n{}", date, scope, canonical_request_hash);
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{}\n{}\n{}",
+        date, scope, canonical_request_hash
+    );
 
     let k_secret = format!("AWS4{}", secret_access_key);
     let k_date = hmac_sha256(k_secret.as_bytes(), date_short.as_bytes());
@@ -302,7 +308,10 @@ mod tests {
             .header("authorization", &auth_header)
             .body(())
             .unwrap();
-        assert!(verify_request(&auth, &req, false).is_ok(), "signed request must pass");
+        assert!(
+            verify_request(&auth, &req, false).is_ok(),
+            "signed request must pass"
+        );
     }
 
     #[test]

@@ -192,7 +192,10 @@ impl TxnCoordinator {
         err,
     )]
     pub async fn begin(&self, idempotency_key: Option<String>) -> XtableResult<String> {
-        let _timed = Timed::new(&metrics().txn_begin_duration, vec![KeyValue::new("op", "begin")]);
+        let _timed = Timed::new(
+            &metrics().txn_begin_duration,
+            vec![KeyValue::new("op", "begin")],
+        );
         let txn_id = Self::next_txn_id();
         tracing::Span::current().record("txn.id", tracing::field::display(&txn_id));
         let snapshot_version = self.store.current_global_version()?;
@@ -211,7 +214,9 @@ impl TxnCoordinator {
             idempotency_key,
         })?;
         debug!(txn = %txn_id, version = snapshot_version, "BeginTxn");
-        metrics().txn_begin_total.add(1, &[KeyValue::new("outcome", "ok")]);
+        metrics()
+            .txn_begin_total
+            .add(1, &[KeyValue::new("outcome", "ok")]);
         Ok(txn_id)
     }
 
@@ -260,7 +265,11 @@ impl TxnCoordinator {
         let entry = WriteSetEntry {
             backend_key: key.as_str().to_string(),
             body_handle: body_handle.clone(),
-            inline_body: if body_handle.is_none() { Some(body.clone()) } else { None },
+            inline_body: if body_handle.is_none() {
+                Some(body.clone())
+            } else {
+                None
+            },
             size: body.len() as u64,
             content_type,
             user_meta: user_meta.into_iter().collect(),
@@ -277,11 +286,8 @@ impl TxnCoordinator {
         // would be allocated at commit time (an over-estimate is fine; the
         // actual commit_version is decided atomically in `commit`).
         let next_version = txn.snapshot_version.saturating_add(1);
-        self.lock_manager.register_write(
-            txn_id,
-            key.as_str(),
-            next_version,
-        );
+        self.lock_manager
+            .register_write(txn_id, key.as_str(), next_version);
         Ok(())
     }
 
@@ -330,7 +336,8 @@ impl TxnCoordinator {
         m.txn_commit_active.add(1, &[KeyValue::new("op", "commit")]);
         let _timed = Timed::new(&m.txn_commit_duration, vec![KeyValue::new("op", "commit")]);
         let result = self.commit_inner(txn_id).await;
-        m.txn_commit_active.add(-1, &[KeyValue::new("op", "commit")]);
+        m.txn_commit_active
+            .add(-1, &[KeyValue::new("op", "commit")]);
         m.txn_commit_total.add(
             1,
             &[KeyValue::new(
@@ -346,7 +353,12 @@ impl TxnCoordinator {
         if let Some(rec) = self.store.get_txn_state(txn_id)? {
             if rec.status == TxnStatus::Committed {
                 // Return last known commit version from alloc_versions.
-                let v = rec.alloc_versions.iter().map(|(_, v)| *v).max().unwrap_or(rec.snapshot_version);
+                let v = rec
+                    .alloc_versions
+                    .iter()
+                    .map(|(_, v)| *v)
+                    .max()
+                    .unwrap_or(rec.snapshot_version);
                 return Ok(CommitOutcome { commit_version: v });
             }
             if rec.status == TxnStatus::Aborted {
@@ -354,13 +366,17 @@ impl TxnCoordinator {
             }
             if rec.status == TxnStatus::Committing {
                 // Mid-flight from a previous crashed instance — conservative abort.
-                return Err(TxnError::InvalidState(format!("txn in {:?} state", rec.status)).into());
+                return Err(
+                    TxnError::InvalidState(format!("txn in {:?} state", rec.status)).into(),
+                );
             }
         } else {
             return Err(TxnError::UnknownTxn(txn_id.to_string()).into());
         }
 
-        let mut txn = self.store.get_txn_state(txn_id)?
+        let mut txn = self
+            .store
+            .get_txn_state(txn_id)?
             .ok_or_else(|| TxnError::UnknownTxn(txn_id.to_string()))?;
         let write_entries = self.store.iter_write_set(txn_id)?;
 
@@ -420,7 +436,8 @@ impl TxnCoordinator {
                 return Err(XtableError::Conflict(format!(
                     "{}: snapshot {} < chain latest {}",
                     key, txn.snapshot_version, latest
-                )).into());
+                ))
+                .into());
             }
         }
 
@@ -449,14 +466,16 @@ impl TxnCoordinator {
         //  - I1 (chain monotonic): enforced by append_chain_entries_bulk
         //  - I6 (atomicity): all entries appended in a single redb write txn
         // V10: deleted entries get a tombstone VersionEntry.
-        let mut entries: Vec<(String, xtable_storage::VersionEntry, u64)> = Vec::with_capacity(alloc_versions.len());
+        let mut entries: Vec<(String, xtable_storage::VersionEntry, u64)> =
+            Vec::with_capacity(alloc_versions.len());
         for (k, v) in &alloc_versions {
             let write_entry = write_entries.iter().find(|(kk, _)| kk == k);
             let is_deleted = write_entry.map(|(_, e)| e.deleted).unwrap_or(false);
             let size = write_entry.map(|(_, e)| e.size).unwrap_or(0);
 
             let entry = if is_deleted {
-                let mut e = xtable_storage::VersionEntry::tombstone(*v, k.clone(), txn_id.to_string());
+                let mut e =
+                    xtable_storage::VersionEntry::tombstone(*v, k.clone(), txn_id.to_string());
                 e.size = 0;
                 e
             } else {
@@ -472,7 +491,7 @@ impl TxnCoordinator {
             // bulk append can detect snapshot conflicts atomically.
             entries.push((k.clone(), entry, txn.snapshot_version));
         }
-self.store.append_chain_entries_bulk(&entries)?;
+        self.store.append_chain_entries_bulk(&entries)?;
 
         // V4 fix: keep TBL_VERSIONS in sync with the chain. The chain is
         // the authoritative log; TBL_VERSIONS mirrors it for compensation
@@ -501,7 +520,11 @@ self.store.append_chain_entries_bulk(&entries)?;
         }
         self.store.put_versions_bulk(&version_updates)?;
 
-        let commit_version = alloc_versions.iter().map(|(_, v)| *v).max().unwrap_or(txn.snapshot_version);
+        let commit_version = alloc_versions
+            .iter()
+            .map(|(_, v)| *v)
+            .max()
+            .unwrap_or(txn.snapshot_version);
 
         // 9. Mark committed (WAL + TxnState).
         self.store.append_wal(&WalRecord::Committed {
@@ -538,8 +561,7 @@ self.store.append_chain_entries_bulk(&entries)?;
             };
             let (space, table, record_id) = parse_record_key(key)
                 .unwrap_or_else(|| (String::new(), String::new(), key.clone()));
-            let mem_key: xtable_storage::memtable::RecordKey =
-                (space, table, record_id);
+            let mem_key: xtable_storage::memtable::RecordKey = (space, table, record_id);
             let cv_atomic = Arc::new(std::sync::atomic::AtomicU64::new(commit_version));
             let mem_entry = MemEntry {
                 key: mem_key.clone(),
@@ -555,7 +577,8 @@ self.store.append_chain_entries_bulk(&entries)?;
             };
             // Memtable write is best-effort — chain append is already durable.
             let _ = self.memtable_set.put_invisible(mem_entry);
-            self.memtable_set.publish(&mem_key, commit_version, commit_version);
+            self.memtable_set
+                .publish(&mem_key, commit_version, commit_version);
         }
 
         // PR #4: mark the txn as recently committed in the SI lock
@@ -679,7 +702,9 @@ self.store.append_chain_entries_bulk(&entries)?;
                     return Ok(Some(inline.clone()));
                 }
                 if let Some(handle) = &e.body_handle {
-                    let rec = self.store.get_blob(handle)?
+                    let rec = self
+                        .store
+                        .get_blob(handle)?
                         .ok_or_else(|| XtableError::Storage(format!("blob missing: {}", handle)))?;
                     let bytes = tokio::fs::read(&rec.path).await?;
                     return Ok(Some(bytes));
@@ -693,7 +718,9 @@ self.store.append_chain_entries_bulk(&entries)?;
     fn require_active(&self, txn_id: &str) -> XtableResult<TxnStateRecord> {
         match self.store.get_txn_state(txn_id)? {
             Some(t) if t.status == TxnStatus::Active => Ok(t),
-            Some(t) => Err(TxnError::InvalidState(format!("txn not active: {:?}", t.status)).into()),
+            Some(t) => {
+                Err(TxnError::InvalidState(format!("txn not active: {:?}", t.status)).into())
+            }
             None => Err(TxnError::UnknownTxn(txn_id.to_string()).into()),
         }
     }

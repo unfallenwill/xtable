@@ -9,7 +9,6 @@ use axum::response::IntoResponse;
 use clap::Parser;
 use tracing::{info, warn};
 
-
 use xtable_auth::StaticCredential;
 use xtable_backend::BackendClient;
 use xtable_core::config::Config;
@@ -74,7 +73,8 @@ async fn main() -> anyhow::Result<()> {
             Err(e) => warn!(err = %e, "recovery failed; attempting cold rebuild"),
         }
         // Cold rebuild: only if recovery surfaced 0 commits and redb is fresh.
-        if store.current_global_version().unwrap_or(0) == 0 && store.iter_wal().unwrap().is_empty() {
+        if store.current_global_version().unwrap_or(0) == 0 && store.iter_wal().unwrap().is_empty()
+        {
             match xtable_tx::rebuild::rebuild(&store, &backend).await {
                 Ok(report) => info!(?report, "cold rebuild done"),
                 Err(e) => {
@@ -83,7 +83,8 @@ async fn main() -> anyhow::Result<()> {
                     // subsequent commit as if it were a fresh global_version=0
                     // and risk overwriting real data at v1+.
                     return Err(anyhow::anyhow!(
-                        "cold rebuild failed; refusing to start with empty index: {}", e
+                        "cold rebuild failed; refusing to start with empty index: {}",
+                        e
                     ));
                 }
             }
@@ -107,13 +108,8 @@ async fn main() -> anyhow::Result<()> {
     let metrics =
         xtable_telemetry::metrics::Metrics::new(&xtable_telemetry::global::meter("xtable"));
 
-    let state = xtable_server::app::AppState::new(
-        config.clone(),
-        store,
-        backend.clone(),
-        creds,
-        metrics,
-    );
+    let state =
+        xtable_server::app::AppState::new(config.clone(), store, backend.clone(), creds, metrics);
 
     // Spawn GC task.
     spawn_gc(state.clone());
@@ -211,10 +207,12 @@ fn build_router(state: xtable_server::app::AppState) -> axum::Router {
             state.clone(),
             red_metrics_middleware,
         ))
-        .layer(TraceLayer::new_for_http()
-            .make_span_with(SemConvMakeSpan)
-            .on_response(SemConvOnResponse)
-            .on_failure(SemConvOnFailure))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(SemConvMakeSpan)
+                .on_response(SemConvOnResponse)
+                .on_failure(SemConvOnFailure),
+        )
         .with_state(state)
 }
 
@@ -226,11 +224,18 @@ async fn auth_middleware(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     use xtable_auth::verify_request;
-    let is_read = matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD);
+    let is_read = matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    );
     if let Err(e) = verify_request(&state.auth, &req, is_read) {
         let status = e.http_status();
-        return (axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::UNAUTHORIZED),
-                format!("{}", e)).into_response();
+        return (
+            axum::http::StatusCode::from_u16(status)
+                .unwrap_or(axum::http::StatusCode::UNAUTHORIZED),
+            format!("{}", e),
+        )
+            .into_response();
     }
     next.run(req).await
 }

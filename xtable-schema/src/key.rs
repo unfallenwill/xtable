@@ -43,7 +43,10 @@ fn validate_segment(label: &str, seg: &str) -> Result<(), XtableError> {
 pub fn schema_key(space: &str, name: &str, version: u32) -> Result<String, XtableError> {
     validate_segment("space", space)?;
     validate_segment("name", name)?;
-    Ok(format!("{}/{}/{}/{}/v{}.json", XT_PREFIX, space, SCHEMA_SEG, name, version))
+    Ok(format!(
+        "{}/{}/{}/{}/v{}.json",
+        XT_PREFIX, space, SCHEMA_SEG, name, version
+    ))
 }
 
 /// Parse a schema key back into (space, name, version). Returns None if
@@ -64,7 +67,11 @@ pub fn parse_schema_key(key: &str) -> Option<SchemaKeyParts> {
     }
     let v_str = last.strip_prefix('v')?.strip_suffix(".json")?;
     let version: u32 = v_str.parse().ok()?;
-    Some(SchemaKeyParts { space, name, version })
+    Some(SchemaKeyParts {
+        space,
+        name,
+        version,
+    })
 }
 
 /// Build the S3 key for a record document.
@@ -78,7 +85,10 @@ pub fn record_key(space: &str, table: &str, record_id: &str) -> Result<String, X
             "table name `{SCHEMA_SEG}` is reserved"
         )));
     }
-    Ok(format!("{}/{}/{}/{}.json", XT_PREFIX, space, table, record_id))
+    Ok(format!(
+        "{}/{}/{}/{}.json",
+        XT_PREFIX, space, table, record_id
+    ))
 }
 
 /// Parse a record key back into (space, table, record_id). Returns None if

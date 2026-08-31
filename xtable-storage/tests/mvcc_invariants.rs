@@ -29,7 +29,13 @@ fn make_store() -> LocalStore {
 }
 
 fn entry(v: u64, key: &str, size: u64) -> VersionEntry {
-    let mut e = VersionEntry::new(v, format!("e{}", v), key.to_string(), format!("T{}", v), size);
+    let mut e = VersionEntry::new(
+        v,
+        format!("e{}", v),
+        key.to_string(),
+        format!("T{}", v),
+        size,
+    );
     e.created_ms = 0;
     e
 }

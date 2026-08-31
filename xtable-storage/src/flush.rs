@@ -148,8 +148,8 @@ pub async fn flush_one(
     // PR-Fix14.1: the slice is used later for sha256 (currently a no-op
     // reserved column). Bind to `_` so the compiler doesn't complain
     // about an unused binding.
-    let _compressed_body = &file_bytes[body_offset..body_offset
-        + header.compressed_body_len as usize];
+    let _compressed_body =
+        &file_bytes[body_offset..body_offset + header.compressed_body_len as usize];
 
     // 3. Compute shard from the first key.
     let shard = compute_shard(&header.key_min);
@@ -292,7 +292,13 @@ fn compute_shard(key_min: &[u8]) -> u8 {
 /// Upload a chunk file to S3. PR-Fix3.2: collapsed to a single
 /// `put_object` call; multipart wiring lands when `BackendClient`
 /// grows multipart support (see M5 review item).
-#[tracing::instrument(level = "info", name = "chunk.upload", skip_all, fields(op = "chunk.upload"), err)]
+#[tracing::instrument(
+    level = "info",
+    name = "chunk.upload",
+    skip_all,
+    fields(op = "chunk.upload"),
+    err
+)]
 async fn upload_chunk(
     backend: &xtable_backend::BackendClient,
     s3_key: &str,
@@ -308,12 +314,7 @@ async fn upload_chunk(
     let mut meta = HashMap::new();
     meta.insert("x-amz-meta-xtable-format".into(), "chunk_v1".into());
     backend
-        .put_object(
-            &ObjectKey::new(s3_key),
-            file_bytes,
-            Some("zstd"),
-            meta,
-        )
+        .put_object(&ObjectKey::new(s3_key), file_bytes, Some("zstd"), meta)
         .await?;
     // BackendClient doesn't surface etag yet (see M6 review item).
     Ok(String::new())
@@ -349,7 +350,13 @@ impl crate::store::LocalStore {
     /// Truncate WAL rows with `seq <= up_to_seq`. Returns the number of
     /// rows removed. PR-Fix3.1: collapsed `truncate_wal_up_to`,
     /// `truncate_wal_strict`, and `truncate_wal` into one.
-    #[tracing::instrument(level = "info", name = "wal.truncate", skip_all, fields(op = "wal.truncate"), err)]
+    #[tracing::instrument(
+        level = "info",
+        name = "wal.truncate",
+        skip_all,
+        fields(op = "wal.truncate"),
+        err
+    )]
     pub fn truncate_wal(&self, up_to_seq: u64) -> XtableResult<usize> {
         use redb::ReadableTable;
         let mut removed = 0;

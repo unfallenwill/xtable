@@ -12,8 +12,8 @@ pub mod profiles;
 pub mod providers;
 pub mod resource;
 pub mod shutdown;
-pub mod timed;
 pub mod testing;
+pub mod timed;
 
 // Re-export commonly-needed OTel types so downstream crates (e.g.
 // `xtable-server`) do not need to depend on `opentelemetry` directly.

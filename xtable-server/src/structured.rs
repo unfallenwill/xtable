@@ -28,9 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use xtable_core::{XtableError, XtableResult};
-use xtable_schema::{
-    Filter, OrderDir, Query as StructuredQuery, RecordWrite, WriteOutcome,
-};
+use xtable_schema::{Filter, OrderDir, Query as StructuredQuery, RecordWrite, WriteOutcome};
 use xtable_telemetry::timed::Timed;
 use xtable_telemetry::KeyValue;
 
@@ -38,7 +36,10 @@ use crate::app::AppState;
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/v1/spaces/:space/schemas", post(register_schema).get(list_schemas))
+        .route(
+            "/v1/spaces/:space/schemas",
+            post(register_schema).get(list_schemas),
+        )
         .route("/v1/spaces/:space/schemas/:name", get(get_schema))
         .route("/v1/spaces/:space/tables/:table/bind", post(bind_table))
         .route(
@@ -102,7 +103,7 @@ async fn register_schema(
             StatusCode::CREATED,
             Json(json!({ "version": version, "name": req.name })),
         )
-        .into_response(),
+            .into_response(),
         Err(e) => error_response(e),
     }
 }
@@ -126,8 +127,14 @@ async fn get_schema(
     Path((space, name)): Path<(String, String)>,
     Query(params): Query<SchemaQuery>,
 ) -> Response {
-    let snap = params.snapshot.as_deref().and_then(|s| s.parse::<u64>().ok());
-    let version = params.version.as_deref().and_then(|s| s.parse::<u32>().ok());
+    let snap = params
+        .snapshot
+        .as_deref()
+        .and_then(|s| s.parse::<u64>().ok());
+    let version = params
+        .version
+        .as_deref()
+        .and_then(|s| s.parse::<u32>().ok());
     // PR #6: wrap read in a short-lived txn for SSI ReadSet capture.
     let txn = match state.structured.begin_txn().await {
         Ok(t) => t,
@@ -148,7 +155,7 @@ async fn get_schema(
                 "body": info.body,
             })),
         )
-        .into_response(),
+            .into_response(),
         Ok(None) => not_found(),
         Err(e) => error_response(e),
     }
@@ -162,10 +169,7 @@ async fn get_schema(
 
 
 )]
-async fn list_schemas(
-    State(state): State<Arc<AppState>>,
-    Path(space): Path<String>,
-) -> Response {
+async fn list_schemas(State(state): State<Arc<AppState>>, Path(space): Path<String>) -> Response {
     let txn = match state.structured.begin_txn().await {
         Ok(t) => t,
         Err(e) => return error_response(e),
@@ -183,7 +187,7 @@ async fn list_schemas(
                 })).collect::<Vec<_>>(),
             })),
         )
-        .into_response(),
+            .into_response(),
         Err(e) => error_response(e),
     }
 }
@@ -310,7 +314,7 @@ async fn upsert_record(
                 commit_version: c,
             }),
         )
-        .into_response(),
+            .into_response(),
         Err(e) => error_response(e),
     }
 }
@@ -338,7 +342,10 @@ async fn get_record(
     Path((space, table, record_id)): Path<(String, String, String)>,
     Query(params): Query<GetRecordQuery>,
 ) -> Response {
-    let snap = params.snapshot.as_deref().and_then(|s| s.parse::<u64>().ok());
+    let snap = params
+        .snapshot
+        .as_deref()
+        .and_then(|s| s.parse::<u64>().ok());
     let txn = match state.structured.begin_txn().await {
         Ok(t) => t,
         Err(e) => return error_response(e),
@@ -361,7 +368,7 @@ async fn get_record(
                 "deleted": r.deleted,
             })),
         )
-        .into_response(),
+            .into_response(),
         Ok(None) => not_found(),
         Err(e) => error_response(e),
     }
@@ -416,7 +423,7 @@ async fn delete_record(
             StatusCode::OK,
             Json(json!({ "deleted": true, "commit_version": cv })),
         )
-        .into_response(),
+            .into_response(),
         Err(e) => error_response(e),
     }
 }
@@ -446,9 +453,16 @@ async fn query_records(
     Path((space, table)): Path<(String, String)>,
     Query(params): Query<QueryParams>,
 ) -> Response {
-    let snap = params.snapshot.as_deref().and_then(|s| s.parse::<u64>().ok());
+    let snap = params
+        .snapshot
+        .as_deref()
+        .and_then(|s| s.parse::<u64>().ok());
     let mut q = StructuredQuery::new();
-    if let (Some(f), Some(op), Some(v)) = (&params.filter_field, &params.filter_op, &params.filter_value) {
+    if let (Some(f), Some(op), Some(v)) = (
+        &params.filter_field,
+        &params.filter_op,
+        &params.filter_value,
+    ) {
         match build_filter(f, op, v) {
             Ok(filter) => q = q.filter(filter),
             Err(e) => return error_response(e),
@@ -461,10 +475,18 @@ async fn query_records(
         };
         q = q.order(field, dir);
     }
-    if let Some(n) = params.limit.as_deref().and_then(|s| s.parse::<usize>().ok()) {
+    if let Some(n) = params
+        .limit
+        .as_deref()
+        .and_then(|s| s.parse::<usize>().ok())
+    {
         q = q.limit(n);
     }
-    if let Some(o) = params.offset.as_deref().and_then(|s| s.parse::<usize>().ok()) {
+    if let Some(o) = params
+        .offset
+        .as_deref()
+        .and_then(|s| s.parse::<usize>().ok())
+    {
         q = q.offset(o);
     }
     let txn = match state.structured.begin_txn().await {
@@ -492,7 +514,7 @@ async fn query_records(
                 })).collect::<Vec<_>>(),
             })),
         )
-        .into_response(),
+            .into_response(),
         Err(e) => error_response(e),
     }
 }
@@ -501,20 +523,43 @@ fn build_filter(field: &str, op: &str, value: &str) -> XtableResult<Filter> {
     let v: Value = serde_json::from_str(value)
         .or_else(|_| Ok::<Value, serde_json::Error>(Value::String(value.to_string())))?;
     match op {
-        "eq" => Ok(Filter::Eq { field: field.to_string(), value: v }),
-        "ne" => Ok(Filter::Ne { field: field.to_string(), value: v }),
-        "gt" => Ok(Filter::Gt { field: field.to_string(), value: v }),
-        "ge" => Ok(Filter::Ge { field: field.to_string(), value: v }),
-        "lt" => Ok(Filter::Lt { field: field.to_string(), value: v }),
-        "le" => Ok(Filter::Le { field: field.to_string(), value: v }),
+        "eq" => Ok(Filter::Eq {
+            field: field.to_string(),
+            value: v,
+        }),
+        "ne" => Ok(Filter::Ne {
+            field: field.to_string(),
+            value: v,
+        }),
+        "gt" => Ok(Filter::Gt {
+            field: field.to_string(),
+            value: v,
+        }),
+        "ge" => Ok(Filter::Ge {
+            field: field.to_string(),
+            value: v,
+        }),
+        "lt" => Ok(Filter::Lt {
+            field: field.to_string(),
+            value: v,
+        }),
+        "le" => Ok(Filter::Le {
+            field: field.to_string(),
+            value: v,
+        }),
         "contains" => {
             let s = v
                 .as_str()
                 .ok_or_else(|| XtableError::invalid("contains requires string value"))?
                 .to_string();
-            Ok(Filter::Contains { field: field.to_string(), value: s })
+            Ok(Filter::Contains {
+                field: field.to_string(),
+                value: s,
+            })
         }
-        "exists" => Ok(Filter::Exists { field: field.to_string() }),
+        "exists" => Ok(Filter::Exists {
+            field: field.to_string(),
+        }),
         _ => Err(XtableError::invalid(format!("unknown filter op: {op}"))),
     }
 }
@@ -546,9 +591,7 @@ async fn diff_records(
         Ok(t) => t,
         Err(e) => return error_response(e),
     };
-    let result = state
-        .structured
-        .diff(&txn, &space, &table, s1, s2);
+    let result = state.structured.diff(&txn, &space, &table, s1, s2);
     let _ = state.structured.abort_txn(&txn).await;
     match result {
         Ok(items) => (
@@ -563,7 +606,7 @@ async fn diff_records(
                 })).collect::<Vec<_>>(),
             })),
         )
-        .into_response(),
+            .into_response(),
         Err(e) => error_response(e),
     }
 }
@@ -572,9 +615,7 @@ async fn diff_records(
     level = "info",
     name = "begin_structured_txn",
     skip_all,
-    fields(op = "begin_structured_txn"),
-
-
+    fields(op = "begin_structured_txn")
 )]
 async fn begin_structured_txn(State(state): State<Arc<AppState>>) -> Response {
     match state.structured.begin_txn().await {
@@ -585,7 +626,7 @@ async fn begin_structured_txn(State(state): State<Arc<AppState>>) -> Response {
                 "snapshot_version": t.snapshot_version,
             })),
         )
-        .into_response(),
+            .into_response(),
         Err(e) => error_response(e),
     }
 }
@@ -598,10 +639,7 @@ async fn begin_structured_txn(State(state): State<Arc<AppState>>) -> Response {
 
 
 )]
-async fn space_snapshot(
-    State(state): State<Arc<AppState>>,
-    Path(space): Path<String>,
-) -> Response {
+async fn space_snapshot(State(state): State<Arc<AppState>>, Path(space): Path<String>) -> Response {
     let snap = state.store.current_global_version().unwrap_or(0);
     (
         StatusCode::OK,
@@ -610,7 +648,7 @@ async fn space_snapshot(
             "snapshot_version": snap,
         })),
     )
-    .into_response()
+        .into_response()
 }
 
 fn error_response(e: XtableError) -> Response {
@@ -624,7 +662,7 @@ fn error_response(e: XtableError) -> Response {
             "code": e.s3_code(),
         })),
     )
-    .into_response()
+        .into_response()
 }
 
 fn not_found() -> Response {

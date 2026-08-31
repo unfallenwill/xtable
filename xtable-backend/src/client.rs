@@ -9,9 +9,7 @@ use std::time::Duration;
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::types::{
-    CompletedMultipartUpload, CompletedPart, Delete, ObjectIdentifier,
-};
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart, Delete, ObjectIdentifier};
 use aws_sdk_s3::Client;
 
 use crate::error::{BackendError, BackendResult};
@@ -140,7 +138,13 @@ impl BackendClient {
     }
 
     /// Head an object.
-    #[tracing::instrument(level = "info", name = "backend.s3.head", skip_all, fields(op = "head"), err)]
+    #[tracing::instrument(
+        level = "info",
+        name = "backend.s3.head",
+        skip_all,
+        fields(op = "head"),
+        err
+    )]
     pub async fn head_object(&self, key: &ObjectKey) -> BackendResult<HeadObjectResult> {
         let _timed = Timed::new(
             &metrics().backend_s3_duration,
@@ -163,13 +167,23 @@ impl BackendClient {
             content_type: resp.content_type().unwrap_or_default().to_string(),
             user_metadata: resp
                 .metadata()
-                .map(|m| m.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+                .map(|m| {
+                    m.iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect()
+                })
                 .unwrap_or_default(),
         })
     }
 
     /// Get an object's bytes.
-    #[tracing::instrument(level = "info", name = "backend.s3.get", skip_all, fields(op = "get"), err)]
+    #[tracing::instrument(
+        level = "info",
+        name = "backend.s3.get",
+        skip_all,
+        fields(op = "get"),
+        err
+    )]
     pub async fn get_object(&self, key: &ObjectKey) -> BackendResult<GetObjectResult> {
         let _timed = Timed::new(
             &metrics().backend_s3_duration,
@@ -191,11 +205,17 @@ impl BackendClient {
         let size = resp.content_length().unwrap_or(0) as u64;
         let user_metadata: HashMap<String, String> = resp
             .metadata()
-            .map(|m| m.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
-        let body = resp.body.collect().await.map_err(|e| {
-            BackendError::Unreachable(format!("body collect: {}", e))
-        })?;
+        let body = resp
+            .body
+            .collect()
+            .await
+            .map_err(|e| BackendError::Unreachable(format!("body collect: {}", e)))?;
         let bytes = body.into_bytes().to_vec();
 
         Ok(GetObjectResult {
@@ -207,13 +227,13 @@ impl BackendClient {
     }
 
     /// Put an object with explicit metadata.
-///
-/// PR-Fix12: dispatches to multipart upload when `body.len() >=
-/// multipart_threshold` (default 16 MiB). Below the threshold, this
-/// issues a single `PutObject` request as before. Above, it splits
-/// the body into parts of `multipart_part_size`, uploads each in turn,
-/// then completes the upload. On any failure between `create` and
-/// `complete`, an `abort_multipart` cleans up server-side state.
+    ///
+    /// PR-Fix12: dispatches to multipart upload when `body.len() >=
+    /// multipart_threshold` (default 16 MiB). Below the threshold, this
+    /// issues a single `PutObject` request as before. Above, it splits
+    /// the body into parts of `multipart_part_size`, uploads each in turn,
+    /// then completes the upload. On any failure between `create` and
+    /// `complete`, an `abort_multipart` cleans up server-side state.
     pub async fn put_object(
         &self,
         key: &ObjectKey,
@@ -261,7 +281,13 @@ impl BackendClient {
     /// composite ETag (must differ from any individual part's ETag — that
     /// would mean S3 didn't actually combine them). Aborts the upload on
     /// any validation failure.
-    #[tracing::instrument(level = "info", name = "backend.s3.multipart", skip_all, fields(op = "multipart"), err)]
+    #[tracing::instrument(
+        level = "info",
+        name = "backend.s3.multipart",
+        skip_all,
+        fields(op = "multipart"),
+        err
+    )]
     async fn put_object_multipart(
         &self,
         key: &ObjectKey,
@@ -340,9 +366,7 @@ impl BackendClient {
         while offset < body.len() {
             let end = (offset + part_size).min(body.len());
             let chunk = body[offset..end].to_vec();
-            let etag = self
-                .upload_part(key, upload_id, part_number, chunk)
-                .await?;
+            let etag = self.upload_part(key, upload_id, part_number, chunk).await?;
             parts.push((part_number, etag));
             offset = end;
             part_number += 1;
@@ -351,7 +375,13 @@ impl BackendClient {
     }
 
     /// Delete an object. Returns Ok(()) whether or not the key existed.
-    #[tracing::instrument(level = "info", name = "backend.s3.delete", skip_all, fields(op = "delete"), err)]
+    #[tracing::instrument(
+        level = "info",
+        name = "backend.s3.delete",
+        skip_all,
+        fields(op = "delete"),
+        err
+    )]
     pub async fn delete_object(&self, key: &ObjectKey) -> BackendResult<()> {
         let _timed = Timed::new(
             &metrics().backend_s3_duration,
@@ -374,13 +404,7 @@ impl BackendClient {
     /// Ensure the configured bucket exists (create if missing).
     pub async fn ensure_bucket(&self) -> BackendResult<()> {
         let bucket = self.bucket_name();
-        let head = self
-            .inner
-            .client
-            .head_bucket()
-            .bucket(&bucket)
-            .send()
-            .await;
+        let head = self.inner.client.head_bucket().bucket(&bucket).send().await;
         if head.is_ok() {
             return Ok(());
         }
@@ -397,9 +421,7 @@ impl BackendClient {
     /// Convenience for tests / admin: returns the configured bucket name.
     pub fn bucket_name(&self) -> String {
         // Pull bucket from IdentityKeyMap; for v1 we know it's IdentityKeyMap.
-        self.inner
-            .keymap
-            .bucket_for(&ObjectKey::new("__probe__"))
+        self.inner.keymap.bucket_for(&ObjectKey::new("__probe__"))
     }
 
     /// Build a "dummy" backend client backed by an in-memory mock for tests.
@@ -420,7 +442,9 @@ impl BackendClient {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|e| xtable_core::XtableError::Backend(format!("dummy bind: {}", e)))?;
-        let addr = listener.local_addr().map_err(|e| xtable_core::XtableError::Backend(format!("dummy addr: {}", e)))?;
+        let addr = listener
+            .local_addr()
+            .map_err(|e| xtable_core::XtableError::Backend(format!("dummy addr: {}", e)))?;
         let endpoint = format!("http://{}", addr);
         let mock = MockS3::default();
         let state = mock.clone();
@@ -467,12 +491,26 @@ impl BackendClient {
             .set_objects(Some(identifiers))
             .build()
             .map_err(|e| BackendError::Internal(e.to_string()))?;
-        let _ = self.inner.client.delete_objects().bucket(&bucket).delete(delete).send().await.map_err(map_sdk_err)?;
+        let _ = self
+            .inner
+            .client
+            .delete_objects()
+            .bucket(&bucket)
+            .delete(delete)
+            .send()
+            .await
+            .map_err(map_sdk_err)?;
         Ok(())
     }
 
     /// Create multipart upload.
-    #[tracing::instrument(level = "info", name = "backend.s3.create_multipart", skip_all, fields(op = "create_multipart"), err)]
+    #[tracing::instrument(
+        level = "info",
+        name = "backend.s3.create_multipart",
+        skip_all,
+        fields(op = "create_multipart"),
+        err
+    )]
     pub async fn create_multipart(&self, key: &ObjectKey) -> BackendResult<String> {
         let bucket = self.bucket_name();
         let backend_key = self.inner.keymap.backend_key(key).await;
@@ -489,7 +527,13 @@ impl BackendClient {
     }
 
     /// Upload a part. Returns its ETag.
-    #[tracing::instrument(level = "info", name = "backend.s3.upload_part", skip_all, fields(op = "upload_part"), err)]
+    #[tracing::instrument(
+        level = "info",
+        name = "backend.s3.upload_part",
+        skip_all,
+        fields(op = "upload_part"),
+        err
+    )]
     pub async fn upload_part(
         &self,
         key: &ObjectKey,
@@ -517,7 +561,13 @@ impl BackendClient {
     /// Complete a multipart upload. Returns the composite ETag reported
     /// by S3 (which may differ from any individual part's ETag — it's a
     /// hash of the concatenation).
-    #[tracing::instrument(level = "info", name = "backend.s3.complete_multipart", skip_all, fields(op = "complete_multipart"), err)]
+    #[tracing::instrument(
+        level = "info",
+        name = "backend.s3.complete_multipart",
+        skip_all,
+        fields(op = "complete_multipart"),
+        err
+    )]
     pub async fn complete_multipart(
         &self,
         key: &ObjectKey,
@@ -553,7 +603,13 @@ impl BackendClient {
     }
 
     /// Abort a multipart upload.
-    #[tracing::instrument(level = "info", name = "backend.s3.abort_multipart", skip_all, fields(op = "abort_multipart"), err)]
+    #[tracing::instrument(
+        level = "info",
+        name = "backend.s3.abort_multipart",
+        skip_all,
+        fields(op = "abort_multipart"),
+        err
+    )]
     pub async fn abort_multipart(&self, key: &ObjectKey, upload_id: &str) -> BackendResult<()> {
         let bucket = self.bucket_name();
         let backend_key = self.inner.keymap.backend_key(key).await;
@@ -571,17 +627,19 @@ impl BackendClient {
     }
 
     /// List object keys (paginated). Used by cold rebuild.
-    #[tracing::instrument(level = "info", name = "backend.s3.list", skip_all, fields(op = "list"), err)]
+    #[tracing::instrument(
+        level = "info",
+        name = "backend.s3.list",
+        skip_all,
+        fields(op = "list"),
+        err
+    )]
     pub async fn list_objects(&self) -> BackendResult<Vec<ListedObject>> {
         let bucket = self.bucket_name();
         let mut out: Vec<ListedObject> = Vec::new();
         let mut cont: Option<String> = None;
         loop {
-            let mut req = self
-                .inner
-                .client
-                .list_objects_v2()
-                .bucket(&bucket);
+            let mut req = self.inner.client.list_objects_v2().bucket(&bucket);
             if let Some(c) = &cont {
                 req = req.continuation_token(c);
             }

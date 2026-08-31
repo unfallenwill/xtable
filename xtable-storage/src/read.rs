@@ -57,7 +57,13 @@ pub enum ReadSource {
 /// Read at snapshot. Walks active memtable → immutables → record index →
 /// chunk index → S3 GET, in that order. Honors snapshot isolation: only
 /// entries with `commit_version <= snapshot` are visible.
-#[tracing::instrument(level = "debug", name = "chunk.download", skip_all, fields(op = "chunk.download"), err)]
+#[tracing::instrument(
+    level = "debug",
+    name = "chunk.download",
+    skip_all,
+    fields(op = "chunk.download"),
+    err
+)]
 pub async fn read_at_snapshot(
     mems: &Arc<MemTableSet>,
     store: &LocalStore,
@@ -144,7 +150,10 @@ pub async fn read_at_snapshot(
 
     // 7. Decompress + find our record.
     let body = decompress_body(&file_bytes)?;
-    let entries = decode_body_entries(&body, chunk.commit_version_max - chunk.commit_version_min + 1)?;
+    let entries = decode_body_entries(
+        &body,
+        chunk.commit_version_max - chunk.commit_version_min + 1,
+    )?;
     let hit = entries
         .into_iter()
         .find(|e| e.space == space && e.table == table && e.record_id == record_id);

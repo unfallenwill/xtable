@@ -38,9 +38,7 @@ fn setup_provider_and_histogram(
     (exporter, provider, h)
 }
 
-fn collect_names(
-    exporter: &InMemoryMetricExporter,
-) -> std::collections::HashSet<String> {
+fn collect_names(exporter: &InMemoryMetricExporter) -> std::collections::HashSet<String> {
     exporter
         .get_finished_metrics()
         .unwrap_or_default()

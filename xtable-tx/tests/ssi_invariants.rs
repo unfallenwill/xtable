@@ -54,8 +54,14 @@ async fn ssi_write_write_one_winner() {
     let t1 = coord.begin(None).await.unwrap();
     let t2 = coord.begin(None).await.unwrap();
     let key = ObjectKey::new("s/t/k");
-    coord.stage(&t1, &key, b"v1".to_vec(), None, Default::default(), false).await.unwrap();
-    coord.stage(&t2, &key, b"v2".to_vec(), None, Default::default(), false).await.unwrap();
+    coord
+        .stage(&t1, &key, b"v1".to_vec(), None, Default::default(), false)
+        .await
+        .unwrap();
+    coord
+        .stage(&t2, &key, b"v2".to_vec(), None, Default::default(), false)
+        .await
+        .unwrap();
     let r1 = coord.commit(&t1).await;
     let r2 = coord.commit(&t2).await;
     // Strict: not both can succeed.
@@ -82,15 +88,33 @@ async fn ssi_write_skew_aborts_one() {
     let y = ObjectKey::new("s/t/y");
 
     // T1 reads X, Y; commits at snapshot S.
-    coord.read(&t1, &x, xtable_core::Version(0), String::new()).await.unwrap();
-    coord.read(&t1, &y, xtable_core::Version(0), String::new()).await.unwrap();
+    coord
+        .read(&t1, &x, xtable_core::Version(0), String::new())
+        .await
+        .unwrap();
+    coord
+        .read(&t1, &y, xtable_core::Version(0), String::new())
+        .await
+        .unwrap();
     // T2 also reads X, Y.
-    coord.read(&t2, &x, xtable_core::Version(0), String::new()).await.unwrap();
-    coord.read(&t2, &y, xtable_core::Version(0), String::new()).await.unwrap();
+    coord
+        .read(&t2, &x, xtable_core::Version(0), String::new())
+        .await
+        .unwrap();
+    coord
+        .read(&t2, &y, xtable_core::Version(0), String::new())
+        .await
+        .unwrap();
 
     // T1 writes X; T2 writes Y. This is the write-skew pattern.
-    coord.stage(&t1, &x, b"new".to_vec(), None, Default::default(), false).await.unwrap();
-    coord.stage(&t2, &y, b"new".to_vec(), None, Default::default(), false).await.unwrap();
+    coord
+        .stage(&t1, &x, b"new".to_vec(), None, Default::default(), false)
+        .await
+        .unwrap();
+    coord
+        .stage(&t2, &y, b"new".to_vec(), None, Default::default(), false)
+        .await
+        .unwrap();
 
     let r1 = coord.commit(&t1).await;
     let r2 = coord.commit(&t2).await;
@@ -112,8 +136,14 @@ async fn ssi_own_read_write_ok() {
     let t = coord.begin(None).await.unwrap();
     let k = ObjectKey::new("s/t/k");
     // Read then write same key — own-write rule should not abort.
-    coord.read(&t, &k, xtable_core::Version(0), String::new()).await.unwrap();
-    coord.stage(&t, &k, b"v".to_vec(), None, Default::default(), false).await.unwrap();
+    coord
+        .read(&t, &k, xtable_core::Version(0), String::new())
+        .await
+        .unwrap();
+    coord
+        .stage(&t, &k, b"v".to_vec(), None, Default::default(), false)
+        .await
+        .unwrap();
     let r = coord.commit(&t).await;
     assert!(r.is_ok(), "own-read-write must succeed: {:?}", r.err());
 }
@@ -127,10 +157,22 @@ async fn ssi_disjoint_read_write_ok() {
     let a = ObjectKey::new("s/t/a");
     let b = ObjectKey::new("s/t/b");
 
-    coord.read(&t1, &a, xtable_core::Version(0), String::new()).await.unwrap();
-    coord.read(&t2, &b, xtable_core::Version(0), String::new()).await.unwrap();
-    coord.stage(&t1, &a, b"x".to_vec(), None, Default::default(), false).await.unwrap();
-    coord.stage(&t2, &b, b"x".to_vec(), None, Default::default(), false).await.unwrap();
+    coord
+        .read(&t1, &a, xtable_core::Version(0), String::new())
+        .await
+        .unwrap();
+    coord
+        .read(&t2, &b, xtable_core::Version(0), String::new())
+        .await
+        .unwrap();
+    coord
+        .stage(&t1, &a, b"x".to_vec(), None, Default::default(), false)
+        .await
+        .unwrap();
+    coord
+        .stage(&t2, &b, b"x".to_vec(), None, Default::default(), false)
+        .await
+        .unwrap();
 
     let r1 = coord.commit(&t1).await;
     let r2 = coord.commit(&t2).await;
@@ -143,7 +185,10 @@ async fn ssi_read_only_txn_never_aborts() {
     let (coord, _tmp) = setup().await;
     let t = coord.begin(None).await.unwrap();
     let k = ObjectKey::new("s/t/k");
-    coord.read(&t, &k, xtable_core::Version(0), String::new()).await.unwrap();
+    coord
+        .read(&t, &k, xtable_core::Version(0), String::new())
+        .await
+        .unwrap();
     // No writes.
     let r = coord.commit(&t).await;
     assert!(r.is_ok(), "read-only txn must commit: {:?}", r.err());

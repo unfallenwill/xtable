@@ -312,7 +312,10 @@ async fn smoke_structured_data_space() {
         .await
         .unwrap();
     let diff_body = read_json(resp).await;
-    let count = diff_body["changes"].as_array().map(|a| a.len()).unwrap_or(0);
+    let count = diff_body["changes"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
     if count >= 1 {
         println!("[PASS] diff surfaces {count} change(s)");
     } else {
@@ -325,7 +328,9 @@ async fn smoke_structured_data_space() {
         &mut app,
         Request::builder()
             .method("GET")
-            .uri(&format!("/v1/spaces/acme/tables/tasks/records/after_snap?snapshot={s1}"))
+            .uri(&format!(
+                "/v1/spaces/acme/tables/tasks/records/after_snap?snapshot={s1}"
+            ))
             .body(Body::empty())
             .unwrap(),
         StatusCode::NOT_FOUND,
@@ -337,7 +342,9 @@ async fn smoke_structured_data_space() {
         &mut app,
         Request::builder()
             .method("GET")
-            .uri(&format!("/v1/spaces/acme/tables/tasks/records/after_snap?snapshot={s2}"))
+            .uri(&format!(
+                "/v1/spaces/acme/tables/tasks/records/after_snap?snapshot={s2}"
+            ))
             .body(Body::empty())
             .unwrap(),
         StatusCode::OK,

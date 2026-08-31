@@ -45,7 +45,11 @@ async fn main() -> anyhow::Result<()> {
             let objects = out.contents();
             println!("OK ({} objects)", objects.len());
             for o in objects {
-                println!("  obj: {} (size={})", o.key().unwrap_or_default(), o.size().unwrap_or(0));
+                println!(
+                    "  obj: {} (size={})",
+                    o.key().unwrap_or_default(),
+                    o.size().unwrap_or(0)
+                );
             }
         }
         Err(e) => {

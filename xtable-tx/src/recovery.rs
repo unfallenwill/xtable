@@ -40,7 +40,7 @@ fn metrics() -> &'static Metrics {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RecoveryReport {
     pub already_committed: usize,
-    pub chain_won_wal_race: usize,   // V2 fix: chain published, WAL missing → backfill WAL
+    pub chain_won_wal_race: usize, // V2 fix: chain published, WAL missing → backfill WAL
     pub partial_uploads_aborted: usize,
 }
 
@@ -52,12 +52,7 @@ pub async fn recover(store: &LocalStore) -> XtableResult<RecoveryReport> {
     recover_inner(store).await
 }
 
-#[tracing::instrument(
-    level = "info",
-    name = "tx.recover",
-    skip_all,
-    err,
-)]
+#[tracing::instrument(level = "info", name = "tx.recover", skip_all, err)]
 async fn recover_inner(store: &LocalStore) -> XtableResult<RecoveryReport> {
     let log = store.iter_wal()?;
     let mut last_status: HashMap<String, TxnStatus> = HashMap::new();
@@ -72,10 +67,14 @@ async fn recover_inner(store: &LocalStore) -> XtableResult<RecoveryReport> {
         };
         match rec {
             WalRecord::Begin { .. } => {
-                last_status.entry(txn_id.clone()).or_insert(TxnStatus::Active);
+                last_status
+                    .entry(txn_id.clone())
+                    .or_insert(TxnStatus::Active);
             }
             WalRecord::Stage { .. } => {
-                last_status.entry(txn_id.clone()).or_insert(TxnStatus::Active);
+                last_status
+                    .entry(txn_id.clone())
+                    .or_insert(TxnStatus::Active);
             }
             WalRecord::Committing { upload_keys, .. } => {
                 last_status.insert(txn_id.clone(), TxnStatus::Committing);
@@ -162,7 +161,11 @@ async fn recover_inner(store: &LocalStore) -> XtableResult<RecoveryReport> {
                             keys = chain_published_count,
                             "CommitTxn completed before crash (chain won WAL race); backfilling WAL"
                         );
-                        let commit_version = alloc_vers.iter().map(|(_, v)| *v).max().unwrap_or(rec.snapshot_version);
+                        let commit_version = alloc_vers
+                            .iter()
+                            .map(|(_, v)| *v)
+                            .max()
+                            .unwrap_or(rec.snapshot_version);
                         store.append_wal(&WalRecord::Committed {
                             txn_id: txn_id.clone(),
                             commit_version,

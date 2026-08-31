@@ -66,7 +66,12 @@ async fn reqwest_get(url: &str) -> Result<String> {
         stream.write_all(req.as_bytes())?;
         let mut buf = String::new();
         stream.read_to_string(&mut buf)?;
-        let body = buf.split("\r\n\r\n").nth(1).unwrap_or("").trim().to_string();
+        let body = buf
+            .split("\r\n\r\n")
+            .nth(1)
+            .unwrap_or("")
+            .trim()
+            .to_string();
         Ok(body)
     })
     .await?

@@ -38,10 +38,7 @@ pub enum WalRecord {
         upload_keys: Vec<String>,
     },
     /// Terminal committed state.
-    Committed {
-        txn_id: String,
-        commit_version: u64,
-    },
+    Committed { txn_id: String, commit_version: u64 },
     /// Terminal result record (covers both Committed and Aborted outcomes).
     CommitResult {
         txn_id: String,
@@ -49,10 +46,7 @@ pub enum WalRecord {
         success: bool,
     },
     /// Transaction aborted.
-    Aborted {
-        txn_id: String,
-        reason: String,
-    },
+    Aborted { txn_id: String, reason: String },
 
     /// Memtable was flushed to S3. GC truncates WAL up to `up_to_seq`
     /// after this record lands.

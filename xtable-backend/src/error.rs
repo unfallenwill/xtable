@@ -33,8 +33,7 @@ impl BackendError {
         match e.as_service_error() {
             Some(svc) => {
                 let dbg = format!("{:?}", svc);
-                if dbg.to_lowercase().contains("notfound")
-                    || dbg.to_lowercase().contains("no such")
+                if dbg.to_lowercase().contains("notfound") || dbg.to_lowercase().contains("no such")
                 {
                     Self::NotFound(dbg)
                 } else {

@@ -37,7 +37,13 @@ pub struct VersionEntry {
 }
 
 impl VersionEntry {
-    pub fn new(commit_version: u64, etag: String, backend_key: String, txn_id: String, size: u64) -> Self {
+    pub fn new(
+        commit_version: u64,
+        etag: String,
+        backend_key: String,
+        txn_id: String,
+        size: u64,
+    ) -> Self {
         Self {
             commit_version,
             etag,
@@ -76,7 +82,10 @@ pub struct VersionChain {
 
 impl VersionChain {
     pub fn new(key: String) -> Self {
-        Self { key, entries: Vec::new() }
+        Self {
+            key,
+            entries: Vec::new(),
+        }
     }
 
     /// Read at snapshot S: walk from newest, pick first entry with
@@ -100,18 +109,21 @@ impl VersionChain {
     /// is strictly greater than the current latest.
     pub fn append(&mut self, entry: VersionEntry) {
         debug_assert!(
-            self.entries.last().map(|e| e.commit_version < entry.commit_version).unwrap_or(true),
+            self.entries
+                .last()
+                .map(|e| e.commit_version < entry.commit_version)
+                .unwrap_or(true),
             "chain append must be strictly increasing"
         );
         self.entries.push(entry);
     }
 
     /// Prune entries strictly below `min_snapshot` that are not the newest.
-/// Returns the number of entries removed.
-///
-/// Invariant I8: never empty the chain (always keep at least the newest
-/// entry). `min_snapshot = u64::MAX` means "no active readers" — drop
-/// everything but the newest.
+    /// Returns the number of entries removed.
+    ///
+    /// Invariant I8: never empty the chain (always keep at least the newest
+    /// entry). `min_snapshot = u64::MAX` means "no active readers" — drop
+    /// everything but the newest.
     pub fn prune_below(&mut self, min_snapshot: u64) -> usize {
         let n = self.entries.len();
         if n <= 1 {
@@ -147,7 +159,13 @@ mod tests {
         c.append(entry(1));
         c.append(entry(3));
         c.append(entry(5));
-        assert_eq!(c.entries.iter().map(|e| e.commit_version).collect::<Vec<_>>(), vec![1, 3, 5]);
+        assert_eq!(
+            c.entries
+                .iter()
+                .map(|e| e.commit_version)
+                .collect::<Vec<_>>(),
+            vec![1, 3, 5]
+        );
     }
 
     #[test]

@@ -123,12 +123,7 @@ impl Clone for SemConvOnFailure {
 }
 
 impl<B: std::fmt::Debug> OnFailure<B> for SemConvOnFailure {
-    fn on_failure(
-        &mut self,
-        failure: B,
-        latency: Duration,
-        span: &Span,
-    ) {
+    fn on_failure(&mut self, failure: B, latency: Duration, span: &Span) {
         span.record("otel.status_code", "ERROR");
         tracing::warn!(
             latency_ms = latency.as_millis() as u64,
@@ -137,4 +132,3 @@ impl<B: std::fmt::Debug> OnFailure<B> for SemConvOnFailure {
         );
     }
 }
-

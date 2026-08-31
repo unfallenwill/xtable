@@ -88,7 +88,9 @@ where
 {
     fn on_new_span(&self, attrs: &Attributes<'_>, _id: &Id, _ctx: Context<'_, S>) {
         let mut fields = BTreeMap::new();
-        let mut visitor = StringifyVisitor { fields: &mut fields };
+        let mut visitor = StringifyVisitor {
+            fields: &mut fields,
+        };
         attrs.record(&mut visitor);
         let span = CapturedSpan {
             name: attrs.metadata().name().to_string(),

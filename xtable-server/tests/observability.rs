@@ -69,7 +69,9 @@ async fn http_route_produces_metric_data_point() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Snapshot metrics BEFORE shutdown — shutdown clears the buffer.
-    let collected = exporter.get_finished_metrics().expect("in-memory exporter lock");
+    let collected = exporter
+        .get_finished_metrics()
+        .expect("in-memory exporter lock");
     let _ = provider.shutdown();
 
     // Locate the `http.server.request.duration` histogram data point and
@@ -89,8 +91,7 @@ async fn http_route_produces_metric_data_point() {
                         "expected at least one data point for http.server.request.duration"
                     );
                     let dp = &hist.data_points[0];
-                    let keys: Vec<&str> =
-                        dp.attributes.iter().map(|a| a.key.as_str()).collect();
+                    let keys: Vec<&str> = dp.attributes.iter().map(|a| a.key.as_str()).collect();
                     assert!(
                         keys.contains(&"http.route"),
                         "data point must carry `http.route` attribute, got: {keys:?}"

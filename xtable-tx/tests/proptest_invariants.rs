@@ -59,7 +59,10 @@ async fn inv_aborted_txn_leaves_no_state() {
     let txn = coord.begin(None).await.unwrap();
     for i in 0..3 {
         let key = ObjectKey::new(format!("k{}", i));
-        coord.stage(&txn, &key, b"x".to_vec(), None, HashMap::new(), false).await.unwrap();
+        coord
+            .stage(&txn, &key, b"x".to_vec(), None, HashMap::new(), false)
+            .await
+            .unwrap();
     }
     coord.abort(&txn).await.unwrap();
     let status = coord.status(&txn).await.unwrap();
@@ -86,7 +89,6 @@ async fn inv_commit_no_writes_is_idempotent() {
 //   - `ssi_write_write_one_winner` in `tests/ssi_invariants.rs`
 //     (snapshot-conflict check in `append_chain_entries_bulk`)
 //   - `ssi_write_skew_aborts_one` (Cahill cycle detection)
-
 
 // =========================================================================
 // INVARIANT 3: Version monotonicity
@@ -187,9 +189,15 @@ async fn inv_read_your_own_writes_within_txn() {
     let (coord, _store, _tmp) = build_for_test().await;
     let txn = coord.begin(None).await.unwrap();
     let key = ObjectKey::new("k");
-    let staged = coord.stage_body(&txn, "k").await.expect("stage_body lookup ok");
+    let staged = coord
+        .stage_body(&txn, "k")
+        .await
+        .expect("stage_body lookup ok");
     assert!(staged.is_none(), "nothing staged yet");
-    coord.stage(&txn, &key, b"hello".to_vec(), None, HashMap::new(), false).await.unwrap();
+    coord
+        .stage(&txn, &key, b"hello".to_vec(), None, HashMap::new(), false)
+        .await
+        .unwrap();
     let staged = coord.stage_body(&txn, "k").await.unwrap();
     assert!(staged.is_some());
     assert_eq!(staged.unwrap(), b"hello");

@@ -141,10 +141,19 @@ async fn attack_s3_server() -> (String, AttackMock) {
                         let mut b = axum::http::Response::builder()
                             .status(200)
                             .header("content-length", bytes.len());
-                        for (k, v) in s.meta.lock().unwrap().get(&key).cloned().unwrap_or_default() {
+                        for (k, v) in s
+                            .meta
+                            .lock()
+                            .unwrap()
+                            .get(&key)
+                            .cloned()
+                            .unwrap_or_default()
+                        {
                             b = b.header(k, v);
                         }
-                        b.body(axum::body::Body::from(bytes.clone())).unwrap().into_response()
+                        b.body(axum::body::Body::from(bytes.clone()))
+                            .unwrap()
+                            .into_response()
                     }
                     None => (StatusCode::NOT_FOUND, "not found").into_response(),
                 }
@@ -155,8 +164,17 @@ async fn attack_s3_server() -> (String, AttackMock) {
                     return (StatusCode::NOT_FOUND, "not found").into_response();
                 }
                 let len = objs.get(&key).map(|v| v.len()).unwrap_or(0);
-                let mut b = axum::http::Response::builder().status(200).header("content-length", len);
-                for (k, v) in s.meta.lock().unwrap().get(&key).cloned().unwrap_or_default() {
+                let mut b = axum::http::Response::builder()
+                    .status(200)
+                    .header("content-length", len);
+                for (k, v) in s
+                    .meta
+                    .lock()
+                    .unwrap()
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_default()
+                {
                     b = b.header(k, v);
                 }
                 b.body(axum::body::Body::empty()).unwrap().into_response()
@@ -171,7 +189,9 @@ async fn attack_s3_server() -> (String, AttackMock) {
     }
 
     let app = Router::new().fallback(any(root_handler)).with_state(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
     let addr = listener.local_addr().expect("addr");
     let url = format!("http://{}", addr);
     tokio::spawn(async move {
@@ -183,13 +203,27 @@ async fn attack_s3_server() -> (String, AttackMock) {
 
 async fn build_backend(endpoint: &str) -> BackendClient {
     BackendClient::build(
-        endpoint, "us-east-1", "xtable-data",
-        "test", "test", true, 5_000,
-        16 * 1024 * 1024, 16 * 1024 * 1024,
-    ).await.unwrap()
+        endpoint,
+        "us-east-1",
+        "xtable-data",
+        "test",
+        "test",
+        true,
+        5_000,
+        16 * 1024 * 1024,
+        16 * 1024 * 1024,
+    )
+    .await
+    .unwrap()
 }
 
-async fn setup() -> (TxnCoordinator, LocalStore, Arc<BackendClient>, AttackMock, tempfile::TempDir) {
+async fn setup() -> (
+    TxnCoordinator,
+    LocalStore,
+    Arc<BackendClient>,
+    AttackMock,
+    tempfile::TempDir,
+) {
     let (endpoint, mock) = attack_s3_server().await;
     let backend = Arc::new(build_backend(&endpoint).await);
     let tmp = tempfile::TempDir::new().unwrap();
@@ -207,7 +241,14 @@ async fn setup() -> (TxnCoordinator, LocalStore, Arc<BackendClient>, AttackMock,
 /// V10/V18 fix: the `deleted` flag (last arg) was added and threshold was removed.
 async fn stage(coord: &TxnCoordinator, txn: &str, key: &str, body: &[u8]) {
     coord
-        .stage(txn, &ObjectKey::new(key), body.to_vec(), None, HashMap::new(), false)
+        .stage(
+            txn,
+            &ObjectKey::new(key),
+            body.to_vec(),
+            None,
+            HashMap::new(),
+            false,
+        )
         .await
         .expect("stage");
 }
@@ -234,18 +275,27 @@ async fn poc1_ssi_write_write_conflict_aborts_second_txn() {
 
     coord.commit(&t1).await.unwrap();
     let second = coord.commit(&t2).await;
-    assert!(second.is_err(),
-        "snapshot conflict: t2 must not silently overwrite t1");
+    assert!(
+        second.is_err(),
+        "snapshot conflict: t2 must not silently overwrite t1"
+    );
 
     // Spec §5.1: backend MUST NOT have the per-record body (the write
     // is in MemTable only). The chain append is the atomicity point.
-    assert!(mock.get("k").is_none(),
-        "spec §5.1 removed per-record PUT; backend must not have `k`");
+    assert!(
+        mock.get("k").is_none(),
+        "spec §5.1 removed per-record PUT; backend must not have `k`"
+    );
     let chain = store.read_chain("k").unwrap();
-    assert_eq!(chain.entries.len(), 1,
-        "only t1's write should be in the version chain (t2 rejected)");
-    assert_eq!(chain.entries[0].commit_version, 1,
-        "t1's chain entry must be the one that survived");
+    assert_eq!(
+        chain.entries.len(),
+        1,
+        "only t1's write should be in the version chain (t2 rejected)"
+    );
+    assert_eq!(
+        chain.entries[0].commit_version, 1,
+        "t1's chain entry must be the one that survived"
+    );
 }
 
 // =========================================================================
@@ -265,31 +315,54 @@ async fn poc2_recovery_deletes_published_commit() {
     // Committed record is missing.
     // Reconstruct the crash window between `Committing` and the WAL terminal
     // by writing a `Committed` record directly (the canonical terminal).
-    store.append_wal(&WalRecord::Committing {
-        txn_id: txn.clone(),
-        upload_keys: vec!["k".into()],
-    }).unwrap();
+    store
+        .append_wal(&WalRecord::Committing {
+            txn_id: txn.clone(),
+            upload_keys: vec!["k".into()],
+        })
+        .unwrap();
     let mut ts = store.get_txn_state(&txn).unwrap().unwrap();
     ts.status = TxnStatus::Committing;
     ts.uploaded_keys = vec!["k".into()];
     ts.alloc_versions = vec![("k".into(), 1)];
     store.put_txn_state(&txn, &ts).unwrap();
-    store.append_chain_entry("k", &VersionEntry::new(1, "e1".into(), "k".into(), txn.clone(), 7)).unwrap();
-    backend.put_object(&ObjectKey::new("k"), b"payload".to_vec(), None, HashMap::new()).await.unwrap();
+    store
+        .append_chain_entry(
+            "k",
+            &VersionEntry::new(1, "e1".into(), "k".into(), txn.clone(), 7),
+        )
+        .unwrap();
+    backend
+        .put_object(
+            &ObjectKey::new("k"),
+            b"payload".to_vec(),
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
 
     recovery::recover(&store).await.unwrap();
 
     // The chain entry is already published (atomicity point crossed), so
     // recovery must complete the commit: keep the backend object, keep the
     // chain entry, and mark the txn Committed.
-    assert!(mock.contains("k"),
-        "V2: recovery deleted a backend object whose chain entry was already published");
+    assert!(
+        mock.contains("k"),
+        "V2: recovery deleted a backend object whose chain entry was already published"
+    );
     let chain = store.read_chain("k").unwrap();
-    assert_eq!(chain.entries.len(), 1,
-        "V2: chain entry was lost during recovery");
+    assert_eq!(
+        chain.entries.len(),
+        1,
+        "V2: chain entry was lost during recovery"
+    );
     let post = store.get_txn_state(&txn).unwrap().unwrap();
-    assert_eq!(post.status, TxnStatus::Committed,
-        "V2: recovered commit left txn in Aborted state (I2/I7 broken)");
+    assert_eq!(
+        post.status,
+        TxnStatus::Committed,
+        "V2: recovered commit left txn in Aborted state (I2/I7 broken)"
+    );
 }
 
 // =========================================================================
@@ -320,14 +393,21 @@ async fn poc3_cold_rebuild_annihilates_txn_objects() {
 
     // All three objects are committed; they must not be classified as
     // orphans just because the local TxnState was lost with the redb.
-    assert_eq!(report.orphans_deleted, 0,
+    assert_eq!(
+        report.orphans_deleted, 0,
         "V1: cold rebuild wrongly classified committed objects as orphans ({})",
-        report.orphans_deleted);
-    assert_eq!(mock.keys().len(), 3,
-        "V1: cold rebuild deleted committed objects (data loss)");
+        report.orphans_deleted
+    );
+    assert_eq!(
+        mock.keys().len(),
+        3,
+        "V1: cold rebuild deleted committed objects (data loss)"
+    );
     // The MVCC chain must be rebuilt from backend state, not left empty.
-    assert!(!fresh.read_chain("a").unwrap().entries.is_empty(),
-        "V1: cold rebuild left MVCC chain empty for a committed object");
+    assert!(
+        !fresh.read_chain("a").unwrap().entries.is_empty(),
+        "V1: cold rebuild left MVCC chain empty for a committed object"
+    );
 }
 
 // =========================================================================
@@ -357,12 +437,18 @@ async fn poc4_failed_commit_destroys_prior_committed_object() {
     // After T1 rolls back, k must still hold T0's "old" — the compensation
     // path must not run a bare DeleteObject on a key that already had a
     // committed version.
-    assert_eq!(mock.get("k").unwrap(), b"old",
-        "V3: failed-compensation delete destroyed prior committed data");
+    assert_eq!(
+        mock.get("k").unwrap(),
+        b"old",
+        "V3: failed-compensation delete destroyed prior committed data"
+    );
     // The chain entry from T0 must still be there.
     let chain = store.read_chain("k").unwrap();
-    assert_eq!(chain.entries.len(), 1,
-        "V3: T0 chain entry missing after T1 rollback");
+    assert_eq!(
+        chain.entries.len(),
+        1,
+        "V3: T0 chain entry missing after T1 rollback"
+    );
 }
 
 // =========================================================================
@@ -374,8 +460,18 @@ async fn poc5_shared_snapshot_pin_stolen_by_first_committer() {
     let tmp = tempfile::TempDir::new().unwrap();
     let store = LocalStore::open_path(&tmp.path().join("xt.redb")).unwrap();
 
-    store.append_chain_entry("k", &VersionEntry::new(1, "e1".into(), "k".into(), "T1".into(), 1)).unwrap();
-    store.append_chain_entry("k", &VersionEntry::new(6, "e6".into(), "k".into(), "T6".into(), 1)).unwrap();
+    store
+        .append_chain_entry(
+            "k",
+            &VersionEntry::new(1, "e1".into(), "k".into(), "T1".into(), 1),
+        )
+        .unwrap();
+    store
+        .append_chain_entry(
+            "k",
+            &VersionEntry::new(6, "e6".into(), "k".into(), "T6".into(), 1),
+        )
+        .unwrap();
 
     // Two txns both pin snapshot 1. register_snapshot must be reference-
     // counted; otherwise the first commit's unregister will steal the pin
@@ -391,10 +487,15 @@ async fn poc5_shared_snapshot_pin_stolen_by_first_committer() {
 
     // The still-running second txn must see v1 at snapshot 1 (I3/I8).
     let r = store.read_at_snapshot("k", 1).unwrap();
-    assert!(r.is_some(),
-        "V9: active snapshot lost data to GC (phantom delete) — pin not refcounted");
-    assert_eq!(r.unwrap().commit_version, 1,
-        "V9: read_at_snapshot returned the wrong version after GC");
+    assert!(
+        r.is_some(),
+        "V9: active snapshot lost data to GC (phantom delete) — pin not refcounted"
+    );
+    assert_eq!(
+        r.unwrap().commit_version,
+        1,
+        "V9: read_at_snapshot returned the wrong version after GC"
+    );
 }
 
 // =========================================================================
@@ -412,7 +513,14 @@ async fn poc6_transactional_delete_writes_empty_object() {
     // Transactional delete via service.rs (stage with empty body, deleted=true).
     let t1 = coord.begin(None).await.unwrap();
     coord
-        .stage(&t1, &ObjectKey::new("k"), Vec::new(), None, HashMap::new(), true)
+        .stage(
+            &t1,
+            &ObjectKey::new("k"),
+            Vec::new(),
+            None,
+            HashMap::new(),
+            true,
+        )
         .await
         .unwrap();
     coord.commit(&t1).await.unwrap();
@@ -420,11 +528,21 @@ async fn poc6_transactional_delete_writes_empty_object() {
     // The backend object must be gone (not replaced by a 0-byte PutObject),
     // and the chain entry must carry a tombstone so reads at this version
     // return None.
-    assert!(mock.get("k").is_none(),
-        "V10: transactional delete left the backend object in place");
-    let last = store.read_chain("k").unwrap().entries.last().cloned().unwrap();
-    assert!(last.deleted,
-        "V10: chain entry missing tombstone marker after transactional delete");
+    assert!(
+        mock.get("k").is_none(),
+        "V10: transactional delete left the backend object in place"
+    );
+    let last = store
+        .read_chain("k")
+        .unwrap()
+        .entries
+        .last()
+        .cloned()
+        .unwrap();
+    assert!(
+        last.deleted,
+        "V10: chain entry missing tombstone marker after transactional delete"
+    );
 }
 
 // =========================================================================
@@ -443,7 +561,14 @@ async fn poc7_http_layer_rejects_every_txn_after_the_first() {
     let t1 = coord.begin(None).await.unwrap();
     let _g1 = store.current_global_version().unwrap(); // = 0
     coord
-        .stage(&t1, &ObjectKey::new("k"), b"x".to_vec(), None, HashMap::new(), false)
+        .stage(
+            &t1,
+            &ObjectKey::new("k"),
+            b"x".to_vec(),
+            None,
+            HashMap::new(),
+            false,
+        )
         .await
         .unwrap();
     coord.commit(&t1).await.unwrap(); // global_version → 1
@@ -455,17 +580,31 @@ async fn poc7_http_layer_rejects_every_txn_after_the_first() {
     let t2 = coord.begin(None).await.unwrap();
     let _g2 = store.current_global_version().unwrap(); // = 1
     let r = coord
-        .stage(&t2, &ObjectKey::new("fresh"), b"y".to_vec(), None, HashMap::new(), false)
+        .stage(
+            &t2,
+            &ObjectKey::new("fresh"),
+            b"y".to_vec(),
+            None,
+            HashMap::new(),
+            false,
+        )
         .await;
 
     // The stage must succeed.
-    assert!(r.is_ok(),
-        "V18: HTTP-stage threshold rejected the second transaction");
+    assert!(
+        r.is_ok(),
+        "V18: HTTP-stage threshold rejected the second transaction"
+    );
     // Commit t2 — the chain append is the durability boundary now.
     coord.commit(&t2).await.unwrap();
-    assert!(mock.keys().is_empty(),
-        "spec §5.1 removed per-record PUT; backend must be empty after commits");
+    assert!(
+        mock.keys().is_empty(),
+        "spec §5.1 removed per-record PUT; backend must be empty after commits"
+    );
     let chain = store.read_chain("fresh").unwrap();
-    assert_eq!(chain.entries.len(), 1,
-        "V18: second transaction committed but chain entry missing");
+    assert_eq!(
+        chain.entries.len(),
+        1,
+        "V18: second transaction committed but chain entry missing"
+    );
 }

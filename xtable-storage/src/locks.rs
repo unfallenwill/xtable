@@ -81,9 +81,7 @@ pub struct SIEdgeSet {
 
 impl SIEdgeSet {
     pub fn contains_in_edge_from(&self, peer: &str) -> bool {
-        self.edges
-            .iter()
-            .any(|e| e.contains_in_edge_from(peer))
+        self.edges.iter().any(|e| e.contains_in_edge_from(peer))
     }
 
     pub fn add(&mut self, e: SIEdge) {

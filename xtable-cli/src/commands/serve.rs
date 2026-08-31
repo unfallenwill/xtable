@@ -1,8 +1,8 @@
 //! `xtctl serve` — dev convenience that delegates to `xtable-server`.
 
-use std::path::PathBuf;
 use anyhow::Context;
 use clap::Args;
+use std::path::PathBuf;
 
 #[derive(Debug, Args)]
 pub struct ServeArgs {
@@ -23,7 +23,11 @@ pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
     };
     let status = tokio::process::Command::new(&cmd)
         .arg("serve")
-        .args(args.config.iter().map(|p| format!("--config={}", p.display())))
+        .args(
+            args.config
+                .iter()
+                .map(|p| format!("--config={}", p.display())),
+        )
         .status()
         .await
         .with_context(|| format!("spawning {:?}", cmd))?;

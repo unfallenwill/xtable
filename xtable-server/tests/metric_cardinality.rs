@@ -56,15 +56,23 @@ async fn forbidden_labels_never_appear_in_metric_attributes() {
     // including them would expand the in-memory exporter with series that
     // have no business in production telemetry.
     for i in 0..1000 {
-        let outcome = if i % 3 == 0 { "ok" } else if i % 3 == 1 { "err" } else { "conflict" };
+        let outcome = if i % 3 == 0 {
+            "ok"
+        } else if i % 3 == 1 {
+            "err"
+        } else {
+            "conflict"
+        };
         let op = if i % 2 == 0 { "put" } else { "get" };
         let level = if i % 2 == 0 { "active" } else { "immutable" };
-        let route = if i % 4 == 0 { "/v1/spaces/:space/tables" } else { "/v1/spaces/:space" };
+        let route = if i % 4 == 0 {
+            "/v1/spaces/:space/tables"
+        } else {
+            "/v1/spaces/:space"
+        };
 
-        m.txn_commit_total.add(
-            1,
-            &[KeyValue::new("outcome", outcome)],
-        );
+        m.txn_commit_total
+            .add(1, &[KeyValue::new("outcome", outcome)]);
         m.http_request_duration.record(
             0.01,
             &[
@@ -73,16 +81,10 @@ async fn forbidden_labels_never_appear_in_metric_attributes() {
                 KeyValue::new("http.response.status_code", "200"),
             ],
         );
-        m.memtable_bytes.add(
-            1,
-            &[KeyValue::new("level", level)],
-        );
+        m.memtable_bytes.add(1, &[KeyValue::new("level", level)]);
         m.backend_s3_total.add(
             1,
-            &[
-                KeyValue::new("op", op),
-                KeyValue::new("outcome", outcome),
-            ],
+            &[KeyValue::new("op", op), KeyValue::new("outcome", outcome)],
         );
     }
 
@@ -126,8 +128,8 @@ async fn forbidden_labels_never_appear_in_metric_attributes() {
                 } else if let Some(sum_i64) = metric
                     .data
                     .as_any()
-                    .downcast_ref::<opentelemetry_sdk::metrics::data::Sum<i64>>()
-                {
+                    .downcast_ref::<opentelemetry_sdk::metrics::data::Sum<i64>>(
+                ) {
                     for dp in &sum_i64.data_points {
                         checked += 1;
                         for attr in &dp.attributes {
@@ -142,8 +144,8 @@ async fn forbidden_labels_never_appear_in_metric_attributes() {
                 } else if let Some(hist_f64) = metric
                     .data
                     .as_any()
-                    .downcast_ref::<opentelemetry_sdk::metrics::data::Histogram<f64>>()
-                {
+                    .downcast_ref::<opentelemetry_sdk::metrics::data::Histogram<f64>>(
+                ) {
                     for dp in &hist_f64.data_points {
                         checked += 1;
                         for attr in &dp.attributes {
@@ -187,6 +189,9 @@ fn forbidden_labels_list_is_populated() {
     assert!(FORBIDDEN_LABELS.len() >= 10, "spec §6.4 list shrunk");
     for key in FORBIDDEN_LABELS {
         assert!(!key.is_empty(), "empty forbidden label key");
-        assert!(!key.contains('='), "forbidden label must be a key, not k=v: {key}");
+        assert!(
+            !key.contains('='),
+            "forbidden label must be a key, not k=v: {key}"
+        );
     }
 }

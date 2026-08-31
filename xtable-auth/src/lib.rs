@@ -6,4 +6,4 @@ pub mod credentials;
 pub mod verify;
 
 pub use credentials::{CredentialEntry, CredentialStore, StaticCredential};
-pub use verify::{EdgeAuth, XtableAuthenticator, verify_request};
+pub use verify::{verify_request, EdgeAuth, XtableAuthenticator};

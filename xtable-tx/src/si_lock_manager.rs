@@ -153,22 +153,13 @@ impl SiLockManager {
     /// in-edges from any active reader of this key (those readers will
     /// also gain the mirror out-edge). Updates the writers_of index.
     #[instrument(level = "debug", skip_all, fields(txn.id = %txn_id, key = %key))]
-    pub fn register_write(
-        self: &Arc<Self>,
-        txn_id: &str,
-        key: &str,
-        version_to_write: u64,
-    ) {
+    pub fn register_write(self: &Arc<Self>, txn_id: &str, key: &str, version_to_write: u64) {
         // PR-Fix1.5: single critical section — collect readers and apply
         // all mutations under one lock so concurrent `register_read`
         // cannot slip in between snapshot and update.
         let mut g = self.inner.lock();
         // Snapshot readers under the same lock.
-        let readers: Vec<String> = g
-            .readers_of
-            .get(key)
-            .cloned()
-            .unwrap_or_default();
+        let readers: Vec<String> = g.readers_of.get(key).cloned().unwrap_or_default();
         if let Some(entry) = g.by_txn.get_mut(txn_id) {
             entry.writes.push(SIWriteLock {
                 key: key.to_string(),
@@ -357,7 +348,8 @@ impl SiLockManager {
     /// Evict recently-committed entries older than `commit_version_floor`.
     pub fn evict_recent_older_than(self: &Arc<Self>, commit_version_floor: u64) {
         let mut g = self.inner.lock();
-        g.recent.retain(|r| r.commit_version >= commit_version_floor);
+        g.recent
+            .retain(|r| r.commit_version >= commit_version_floor);
         g.recent_floor_version = commit_version_floor;
         // Drop the by_txn entries that have aged past the window and
         // are in `Committed` status. For now, retain all committed.
@@ -412,13 +404,19 @@ mod tests {
         let t2 = mgr.inspect("T2").unwrap();
         assert_eq!(t2.out_edges.len(), 1);
         assert_eq!(t2.out_edges.edges[0].peer, "T1");
-        assert!(matches!(t2.out_edges.edges[0].peer_action, PeerAction::Read));
+        assert!(matches!(
+            t2.out_edges.edges[0].peer_action,
+            PeerAction::Read
+        ));
 
         // T1 has in-edge from T2 (write).
         let t1 = mgr.inspect("T1").unwrap();
         assert_eq!(t1.in_edges.len(), 1);
         assert_eq!(t1.in_edges.edges[0].peer, "T2");
-        assert!(matches!(t1.in_edges.edges[0].peer_action, PeerAction::Wrote));
+        assert!(matches!(
+            t1.in_edges.edges[0].peer_action,
+            PeerAction::Wrote
+        ));
     }
 
     #[test]

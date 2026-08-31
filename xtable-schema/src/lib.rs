@@ -22,12 +22,16 @@
 //! See `xtable-schema/tests/invariants.rs` for the I-REC-* invariants
 //! this layer preserves.
 
-pub mod key;
-pub mod validation;
 pub mod engine;
+pub mod key;
 pub mod query;
+pub mod validation;
 
-pub use engine::{RecordWrite, SchemaInfo, StructuredReader, StructuredSpace, StructuredTxn, WriteOutcome};
-pub use key::{schema_key, record_key, parse_record_key, parse_schema_key, RecordKeyParts, SchemaKeyParts};
-pub use validation::{JsonSchema, validate};
+pub use engine::{
+    RecordWrite, SchemaInfo, StructuredReader, StructuredSpace, StructuredTxn, WriteOutcome,
+};
+pub use key::{
+    parse_record_key, parse_schema_key, record_key, schema_key, RecordKeyParts, SchemaKeyParts,
+};
 pub use query::{Filter, OrderBy, OrderDir, Query, QueryResult, Record};
+pub use validation::{validate, JsonSchema};

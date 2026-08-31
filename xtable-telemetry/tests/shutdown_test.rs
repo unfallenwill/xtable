@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use futures::future::BoxFuture;
 use opentelemetry_sdk::export::logs::{LogBatch, LogExporter};
 use opentelemetry_sdk::export::trace::{ExportResult, SpanData, SpanExporter};
-use opentelemetry_sdk::logs::{LoggerProvider, LogResult};
+use opentelemetry_sdk::logs::{LogResult, LoggerProvider};
 use opentelemetry_sdk::metrics::data::ResourceMetrics;
 use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
 use opentelemetry_sdk::metrics::{MetricResult, PeriodicReader, SdkMeterProvider, Temporality};
@@ -116,7 +116,9 @@ async fn guard_shuts_down_in_order() {
     )
     .with_interval(Duration::from_secs(60))
     .build();
-    let meter = SdkMeterProvider::builder().with_reader(metric_reader).build();
+    let meter = SdkMeterProvider::builder()
+        .with_reader(metric_reader)
+        .build();
 
     let span_processor = BatchSpanProcessor::builder(
         OrderedSpanExporter {

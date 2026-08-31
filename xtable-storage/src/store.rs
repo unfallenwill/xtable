@@ -20,8 +20,8 @@ use redb::{Database, ReadableTable};
 use crate::cf::{
     meta_key, ChunkStatus, TBL_ACTIVE_SNAPSHOTS, TBL_CHUNK_INDEX, TBL_META, TBL_MULTIPART,
     TBL_RECORD_INDEX, TBL_SCHEMA_INDEX, TBL_SI_EDGES, TBL_SI_IN_EDGES_BY_TJ, TBL_SI_READ,
-    TBL_SI_RECENT, TBL_SI_WRITE, TBL_STAGED_BLOBS, TBL_TXN_STATE, TBL_VERSION_CHAINS,
-    TBL_VERSIONS, TBL_WAL, TBL_WRITE_SET,
+    TBL_SI_RECENT, TBL_SI_WRITE, TBL_STAGED_BLOBS, TBL_TXN_STATE, TBL_VERSIONS, TBL_VERSION_CHAINS,
+    TBL_WAL, TBL_WRITE_SET,
 };
 use crate::chunk::ChunkIndexEntry;
 use crate::txn_state::{
@@ -97,11 +97,21 @@ impl LocalStore {
                 let _ = txn.open_table(TBL_SI_RECENT).map_err(redb_err)?;
                 let _ = txn.open_table(TBL_SI_EDGES).map_err(redb_err)?;
                 let mut meta = txn.open_table(TBL_META).map_err(redb_err)?;
-                if meta.get(meta_key::GLOBAL_VERSION).map_err(redb_err)?.is_none() {
-                    meta.insert(meta_key::GLOBAL_VERSION, 0u64).map_err(redb_err)?;
+                if meta
+                    .get(meta_key::GLOBAL_VERSION)
+                    .map_err(redb_err)?
+                    .is_none()
+                {
+                    meta.insert(meta_key::GLOBAL_VERSION, 0u64)
+                        .map_err(redb_err)?;
                 }
-                if meta.get(meta_key::LAST_WAL_SEQ).map_err(redb_err)?.is_none() {
-                    meta.insert(meta_key::LAST_WAL_SEQ, 0u64).map_err(redb_err)?;
+                if meta
+                    .get(meta_key::LAST_WAL_SEQ)
+                    .map_err(redb_err)?
+                    .is_none()
+                {
+                    meta.insert(meta_key::LAST_WAL_SEQ, 0u64)
+                        .map_err(redb_err)?;
                 }
             }
             txn.commit().map_err(redb_err)?;
@@ -109,12 +119,18 @@ impl LocalStore {
         Ok(store)
     }
 
-    pub fn with_read<R>(&self, f: impl FnOnce(&redb::ReadTransaction) -> XtableResult<R>) -> XtableResult<R> {
+    pub fn with_read<R>(
+        &self,
+        f: impl FnOnce(&redb::ReadTransaction) -> XtableResult<R>,
+    ) -> XtableResult<R> {
         let txn = self.db.begin_read().map_err(redb_err)?;
         f(&txn)
     }
 
-    pub fn with_write<R>(&self, f: impl FnOnce(&redb::WriteTransaction) -> XtableResult<R>) -> XtableResult<R> {
+    pub fn with_write<R>(
+        &self,
+        f: impl FnOnce(&redb::WriteTransaction) -> XtableResult<R>,
+    ) -> XtableResult<R> {
         let txn = self.db.begin_write().map_err(redb_err)?;
         let r = f(&txn)?;
         txn.commit().map_err(redb_err)?;
@@ -126,9 +142,14 @@ impl LocalStore {
     pub fn next_global_version(&self) -> XtableResult<u64> {
         self.with_write(|txn| {
             let mut meta = txn.open_table(TBL_META).map_err(redb_err)?;
-            let cur = meta.get(meta_key::GLOBAL_VERSION).map_err(redb_err)?.map(|v| v.value()).unwrap_or(0);
+            let cur = meta
+                .get(meta_key::GLOBAL_VERSION)
+                .map_err(redb_err)?
+                .map(|v| v.value())
+                .unwrap_or(0);
             let next = cur + 1;
-            meta.insert(meta_key::GLOBAL_VERSION, next).map_err(redb_err)?;
+            meta.insert(meta_key::GLOBAL_VERSION, next)
+                .map_err(redb_err)?;
             Ok(next)
         })
     }
@@ -136,7 +157,11 @@ impl LocalStore {
     pub fn current_global_version(&self) -> XtableResult<u64> {
         self.with_read(|txn| {
             let meta = txn.open_table(TBL_META).map_err(redb_err)?;
-            Ok(meta.get(meta_key::GLOBAL_VERSION).map_err(redb_err)?.map(|v| v.value()).unwrap_or(0))
+            Ok(meta
+                .get(meta_key::GLOBAL_VERSION)
+                .map_err(redb_err)?
+                .map(|v| v.value())
+                .unwrap_or(0))
         })
     }
 
@@ -146,7 +171,8 @@ impl LocalStore {
             match tbl.get(key.as_str()).map_err(redb_err)? {
                 Some(v) => {
                     let bytes = v.value();
-                    let rec: VersionRecord = bincode::deserialize(bytes).map_err(XtableError::from)?;
+                    let rec: VersionRecord =
+                        bincode::deserialize(bytes).map_err(XtableError::from)?;
                     Ok(Some(rec))
                 }
                 None => Ok(None),
@@ -156,23 +182,17 @@ impl LocalStore {
 
     /// Insert or update a version-record row.
     #[tracing::instrument(level = "debug", skip_all, fields(op = "store.put"), err)]
-    pub fn put_version(
-        &self,
-        key: &ObjectKey,
-        record: &VersionRecord,
-    ) -> XtableResult<()> {
+    pub fn put_version(&self, key: &ObjectKey, record: &VersionRecord) -> XtableResult<()> {
         let bytes: Vec<u8> = bincode::serialize(record).map_err(XtableError::from)?;
         self.with_write(|txn| {
             let mut tbl = txn.open_table(TBL_VERSIONS).map_err(redb_err)?;
-            tbl.insert(key.as_str(), bytes.as_slice()).map_err(redb_err)?;
+            tbl.insert(key.as_str(), bytes.as_slice())
+                .map_err(redb_err)?;
             Ok(())
         })
     }
 
-    pub fn put_versions_bulk(
-        &self,
-        updates: &[(ObjectKey, VersionRecord)],
-    ) -> XtableResult<()> {
+    pub fn put_versions_bulk(&self, updates: &[(ObjectKey, VersionRecord)]) -> XtableResult<()> {
         if updates.is_empty() {
             return Ok(());
         }
@@ -197,15 +217,26 @@ impl LocalStore {
     pub fn next_wal_seq(&self) -> XtableResult<u64> {
         self.with_write(|txn| {
             let mut meta = txn.open_table(TBL_META).map_err(redb_err)?;
-            let cur = meta.get(meta_key::LAST_WAL_SEQ).map_err(redb_err)?.map(|v| v.value()).unwrap_or(0);
+            let cur = meta
+                .get(meta_key::LAST_WAL_SEQ)
+                .map_err(redb_err)?
+                .map(|v| v.value())
+                .unwrap_or(0);
             let next = cur + 1;
-            meta.insert(meta_key::LAST_WAL_SEQ, next).map_err(redb_err)?;
+            meta.insert(meta_key::LAST_WAL_SEQ, next)
+                .map_err(redb_err)?;
             Ok(next)
         })
     }
 
     /// Append a WAL record. Returns the seq number used.
-    #[tracing::instrument(level = "info", name = "wal.append", skip_all, fields(op = "wal.append"), err)]
+    #[tracing::instrument(
+        level = "info",
+        name = "wal.append",
+        skip_all,
+        fields(op = "wal.append"),
+        err
+    )]
     pub fn append_wal(&self, record: &WalRecord) -> XtableResult<u64> {
         let _timed = Timed::new(
             &metrics().wal_append_duration,
@@ -214,7 +245,11 @@ impl LocalStore {
         let bytes = bincode::serialize(record).map_err(XtableError::from)?;
         self.with_write(|txn| {
             let mut meta = txn.open_table(TBL_META).map_err(redb_err)?;
-            let cur = meta.get(meta_key::LAST_WAL_SEQ).map_err(redb_err)?.map(|v| v.value()).unwrap_or(0);
+            let cur = meta
+                .get(meta_key::LAST_WAL_SEQ)
+                .map_err(redb_err)?
+                .map(|v| v.value())
+                .unwrap_or(0);
             let seq = cur + 1;
             meta.insert(meta_key::LAST_WAL_SEQ, seq).map_err(redb_err)?;
             let mut wal = txn.open_table(TBL_WAL).map_err(redb_err)?;
@@ -243,7 +278,11 @@ impl LocalStore {
     pub fn last_wal_seq(&self) -> XtableResult<u64> {
         self.with_read(|txn| {
             let meta = txn.open_table(TBL_META).map_err(redb_err)?;
-            Ok(meta.get(meta_key::LAST_WAL_SEQ).map_err(redb_err)?.map(|v| v.value()).unwrap_or(0))
+            Ok(meta
+                .get(meta_key::LAST_WAL_SEQ)
+                .map_err(redb_err)?
+                .map(|v| v.value())
+                .unwrap_or(0))
         })
     }
 
@@ -263,7 +302,8 @@ impl LocalStore {
             let tbl = txn.open_table(TBL_TXN_STATE).map_err(redb_err)?;
             match tbl.get(txn_id).map_err(redb_err)? {
                 Some(v) => {
-                    let rec: TxnStateRecord = bincode::deserialize(v.value()).map_err(XtableError::from)?;
+                    let rec: TxnStateRecord =
+                        bincode::deserialize(v.value()).map_err(XtableError::from)?;
                     Ok(Some(rec))
                 }
                 None => Ok(None),
@@ -281,11 +321,17 @@ impl LocalStore {
 
     // ----- write_set (Phase 2 / MVCC) -----
 
-    pub fn put_write_entry(&self, txn_id: &str, key: &str, entry: &WriteSetEntry) -> XtableResult<()> {
+    pub fn put_write_entry(
+        &self,
+        txn_id: &str,
+        key: &str,
+        entry: &WriteSetEntry,
+    ) -> XtableResult<()> {
         let bytes = bincode::serialize(entry).map_err(XtableError::from)?;
         self.with_write(|txn| {
             let mut tbl = txn.open_table(TBL_WRITE_SET).map_err(redb_err)?;
-            tbl.insert((txn_id, key), bytes.as_slice()).map_err(redb_err)?;
+            tbl.insert((txn_id, key), bytes.as_slice())
+                .map_err(redb_err)?;
             Ok(())
         })
     }
@@ -307,7 +353,8 @@ impl LocalStore {
                 let (k, v) = entry.map_err(redb_err)?;
                 let (t, key) = k.value();
                 if t == txn_id {
-                    let rec: WriteSetEntry = bincode::deserialize(v.value()).map_err(XtableError::from)?;
+                    let rec: WriteSetEntry =
+                        bincode::deserialize(v.value()).map_err(XtableError::from)?;
                     out.push((key.to_string(), rec));
                 }
             }
@@ -323,7 +370,8 @@ impl LocalStore {
             for entry in tbl.iter().map_err(redb_err)? {
                 let (k, v) = entry.map_err(redb_err)?;
                 let (t, key) = k.value();
-                let rec: WriteSetEntry = bincode::deserialize(v.value()).map_err(XtableError::from)?;
+                let rec: WriteSetEntry =
+                    bincode::deserialize(v.value()).map_err(XtableError::from)?;
                 out.push((t.to_string(), key.to_string(), rec));
             }
             Ok(out)
@@ -346,7 +394,8 @@ impl LocalStore {
             let tbl = txn.open_table(TBL_STAGED_BLOBS).map_err(redb_err)?;
             match tbl.get(handle).map_err(redb_err)? {
                 Some(v) => {
-                    let rec: BlobRecord = bincode::deserialize(v.value()).map_err(XtableError::from)?;
+                    let rec: BlobRecord =
+                        bincode::deserialize(v.value()).map_err(XtableError::from)?;
                     Ok(Some(rec))
                 }
                 None => Ok(None),
@@ -378,7 +427,8 @@ impl LocalStore {
             let tbl = txn.open_table(TBL_MULTIPART).map_err(redb_err)?;
             match tbl.get(upload_id).map_err(redb_err)? {
                 Some(v) => {
-                    let rec: MultipartState = bincode::deserialize(v.value()).map_err(XtableError::from)?;
+                    let rec: MultipartState =
+                        bincode::deserialize(v.value()).map_err(XtableError::from)?;
                     Ok(Some(rec))
                 }
                 None => Ok(None),
@@ -400,7 +450,8 @@ impl LocalStore {
             let mut out = Vec::new();
             for entry in tbl.iter().map_err(redb_err)? {
                 let (k, v) = entry.map_err(redb_err)?;
-                let rec: MultipartState = bincode::deserialize(v.value()).map_err(XtableError::from)?;
+                let rec: MultipartState =
+                    bincode::deserialize(v.value()).map_err(XtableError::from)?;
                 out.push((k.value().to_string(), rec));
             }
             Ok(out)
@@ -430,7 +481,8 @@ impl LocalStore {
             match tbl.get(key).map_err(redb_err)? {
                 Some(v) => {
                     let bytes = v.value();
-                    let chain: VersionChain = bincode::deserialize(bytes).map_err(XtableError::from)?;
+                    let chain: VersionChain =
+                        bincode::deserialize(bytes).map_err(XtableError::from)?;
                     Ok(chain)
                 }
                 None => Ok(VersionChain::new(key.to_string())),
@@ -458,7 +510,8 @@ impl LocalStore {
         let latest = chain.latest_commit_version();
         if entry.commit_version <= latest && !chain.entries.is_empty() {
             return Err(XtableError::internal(format!(
-                "chain append not monotonic: latest={} new={}", latest, entry.commit_version
+                "chain append not monotonic: latest={} new={}",
+                latest, entry.commit_version
             )));
         }
         chain.append(entry.clone());
@@ -508,7 +561,8 @@ impl LocalStore {
             // Monotonicity check (kept for defense-in-depth).
             if entry.commit_version <= latest && !chain.entries.is_empty() {
                 return Err(XtableError::internal(format!(
-                    "chain append not monotonic for key {}: latest={} new={}", key, latest, entry.commit_version
+                    "chain append not monotonic for key {}: latest={} new={}",
+                    key, latest, entry.commit_version
                 )));
             }
             chain.append(entry.clone());
@@ -566,7 +620,8 @@ impl LocalStore {
             let mut out = Vec::new();
             for entry in tbl.iter().map_err(redb_err)? {
                 let (k, v) = entry.map_err(redb_err)?;
-                let chain: VersionChain = bincode::deserialize(v.value()).map_err(XtableError::from)?;
+                let chain: VersionChain =
+                    bincode::deserialize(v.value()).map_err(XtableError::from)?;
                 out.push((k.value().to_string(), chain));
             }
             Ok(out)
@@ -581,7 +636,11 @@ impl LocalStore {
     pub fn register_snapshot(&self, snapshot: u64) -> XtableResult<()> {
         self.with_write(|txn| {
             let mut tbl = txn.open_table(TBL_ACTIVE_SNAPSHOTS).map_err(redb_err)?;
-            let cur = tbl.get(snapshot).map_err(redb_err)?.map(|v| v.value()).unwrap_or(0);
+            let cur = tbl
+                .get(snapshot)
+                .map_err(redb_err)?
+                .map(|v| v.value())
+                .unwrap_or(0);
             tbl.insert(snapshot, cur + 1).map_err(redb_err)?;
             Ok(())
         })
@@ -592,7 +651,11 @@ impl LocalStore {
     pub fn unregister_snapshot(&self, snapshot: u64) -> XtableResult<()> {
         self.with_write(|txn| {
             let mut tbl = txn.open_table(TBL_ACTIVE_SNAPSHOTS).map_err(redb_err)?;
-            let cur = tbl.get(snapshot).map_err(redb_err)?.map(|v| v.value()).unwrap_or(0);
+            let cur = tbl
+                .get(snapshot)
+                .map_err(redb_err)?
+                .map(|v| v.value())
+                .unwrap_or(0);
             if cur <= 1 {
                 tbl.remove(snapshot).map_err(redb_err)?;
             } else {
@@ -684,7 +747,11 @@ impl LocalStore {
         // does not reliably roundtrip `serde_json::Value`.
         let body_json = serde_json::to_string(body).map_err(XtableError::from)?;
         let entry_owned = entry.clone();
-        let bytes = bincode::serialize(&StoredRecord { entry: entry_owned, body_json }).map_err(XtableError::from)?;
+        let bytes = bincode::serialize(&StoredRecord {
+            entry: entry_owned,
+            body_json,
+        })
+        .map_err(XtableError::from)?;
         self.with_write(|txn| {
             let mut tbl = txn.open_table(TBL_RECORD_INDEX).map_err(redb_err)?;
             tbl.insert((space, table, record_id), bytes.as_slice())
@@ -723,7 +790,12 @@ impl LocalStore {
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(op = "store.delete"), err)]
-    pub fn delete_record_index(&self, space: &str, table: &str, record_id: &str) -> XtableResult<()> {
+    pub fn delete_record_index(
+        &self,
+        space: &str,
+        table: &str,
+        record_id: &str,
+    ) -> XtableResult<()> {
         self.with_write(|txn| {
             let mut tbl = txn.open_table(TBL_RECORD_INDEX).map_err(redb_err)?;
             tbl.remove((space, table, record_id)).map_err(redb_err)?;
@@ -804,7 +876,8 @@ impl LocalStore {
         let bytes = bincode::serialize(entry).map_err(XtableError::from)?;
         self.with_write(|txn| {
             let mut tbl = txn.open_table(TBL_SCHEMA_INDEX).map_err(redb_err)?;
-            tbl.insert((space, name), bytes.as_slice()).map_err(redb_err)?;
+            tbl.insert((space, name), bytes.as_slice())
+                .map_err(redb_err)?;
             Ok(())
         })
     }
@@ -920,7 +993,8 @@ impl LocalStore {
             self.with_write(|txn| {
                 let mut tbl = txn.open_table(TBL_CHUNK_INDEX).map_err(redb_err)?;
                 for (id, bytes) in &updated {
-                    tbl.insert(id.as_str(), bytes.as_slice()).map_err(redb_err)?;
+                    tbl.insert(id.as_str(), bytes.as_slice())
+                        .map_err(redb_err)?;
                 }
                 Ok(())
             })?;
@@ -991,9 +1065,19 @@ mod tests {
     fn wal_append_and_iter() {
         let tmp = TempDir::new().unwrap();
         let store = LocalStore::open_path(&tmp.path().join("xt.redb")).unwrap();
-        let r1 = WalRecord::Begin { txn_id: "T1".into(), snapshot_version: 0, idempotency_key: None };
-        let r2 = WalRecord::Committing { txn_id: "T1".into(), upload_keys: vec![] };
-        let r3 = WalRecord::Committed { txn_id: "T1".into(), commit_version: 1 };
+        let r1 = WalRecord::Begin {
+            txn_id: "T1".into(),
+            snapshot_version: 0,
+            idempotency_key: None,
+        };
+        let r2 = WalRecord::Committing {
+            txn_id: "T1".into(),
+            upload_keys: vec![],
+        };
+        let r3 = WalRecord::Committed {
+            txn_id: "T1".into(),
+            commit_version: 1,
+        };
         store.append_wal(&r1).unwrap();
         store.append_wal(&r2).unwrap();
         store.append_wal(&r3).unwrap();
@@ -1034,8 +1118,22 @@ mod tests {
             (ObjectKey::new("b"), rec.clone()),
         ];
         store.put_versions_bulk(&updates).unwrap();
-        assert_eq!(store.get_version(&ObjectKey::new("a")).unwrap().unwrap().latest_version, xtable_core::Version(1));
-        assert_eq!(store.get_version(&ObjectKey::new("b")).unwrap().unwrap().latest_version, xtable_core::Version(1));
+        assert_eq!(
+            store
+                .get_version(&ObjectKey::new("a"))
+                .unwrap()
+                .unwrap()
+                .latest_version,
+            xtable_core::Version(1)
+        );
+        assert_eq!(
+            store
+                .get_version(&ObjectKey::new("b"))
+                .unwrap()
+                .unwrap()
+                .latest_version,
+            xtable_core::Version(1)
+        );
     }
 
     #[test]
@@ -1080,8 +1178,13 @@ mod tests {
             updated_ms: 1_700_000_000_000,
         };
         let body = serde_json::json!({"a": 1, "b": "hi", "c": [true, false]});
-        store.put_record_index_with_body("s", "t", "r", &entry, &body).unwrap();
-        let (got_entry, got_body) = store.get_record_index_with_body("s", "t", "r").unwrap().unwrap();
+        store
+            .put_record_index_with_body("s", "t", "r", &entry, &body)
+            .unwrap();
+        let (got_entry, got_body) = store
+            .get_record_index_with_body("s", "t", "r")
+            .unwrap()
+            .unwrap();
         assert_eq!(got_entry, entry);
         assert_eq!(got_body, body);
 

@@ -50,7 +50,14 @@ pub async fn handler(
         keys.sort();
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><IsTruncated>false</IsTruncated>{}</ListBucketResult>"#,
-            keys.iter().map(|k| format!("<Contents><Key>{}</Key><Size>{}</Size><ETag>\"e\"</ETag></Contents>", k, objs.get(k).map(|v| v.len()).unwrap_or(0))).collect::<Vec<_>>().join("")
+            keys.iter()
+                .map(|k| format!(
+                    "<Contents><Key>{}</Key><Size>{}</Size><ETag>\"e\"</ETag></Contents>",
+                    k,
+                    objs.get(k).map(|v| v.len()).unwrap_or(0)
+                ))
+                .collect::<Vec<_>>()
+                .join("")
         );
         return (StatusCode::OK, [("content-type", "application/xml")], xml).into_response();
     }
@@ -58,7 +65,13 @@ pub async fn handler(
     // Initiate multipart: POST /bucket/key with ?uploads
     if method == Method::POST && params.contains_key("uploads") {
         let upload_id = format!("mock-upload-{}", uuid_like(&key));
-        s.multiparts.lock().unwrap().insert(upload_id.clone(), MultipartState { key: key.clone(), parts: vec![] });
+        s.multiparts.lock().unwrap().insert(
+            upload_id.clone(),
+            MultipartState {
+                key: key.clone(),
+                parts: vec![],
+            },
+        );
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?><InitiateMultipartUploadResult><Bucket>xtable-test</Bucket><Key>{}</Key><UploadId>{}</UploadId></InitiateMultipartUploadResult>"#,
             key, upload_id
@@ -103,7 +116,8 @@ pub async fn handler(
                     r#"<?xml version="1.0" encoding="UTF-8"?><CompleteMultipartUploadResult><Bucket>xtable-test</Bucket><Key>{}</Key></CompleteMultipartUploadResult>"#,
                     state.key
                 );
-                return (StatusCode::OK, [("content-type", "application/xml")], xml).into_response();
+                return (StatusCode::OK, [("content-type", "application/xml")], xml)
+                    .into_response();
             }
             return (StatusCode::NOT_FOUND, "no such upload").into_response();
         }
@@ -126,12 +140,7 @@ pub async fn handler(
         // canonical capitalisation.
         let etag = format!("\"mock-etag-{}\"", key);
         eprintln!("DEBUG mock PUT returning etag={}", etag);
-        return (
-            StatusCode::OK,
-            [("ETag", etag.as_str())],
-            "",
-        )
-            .into_response();
+        return (StatusCode::OK, [("ETag", etag.as_str())], "").into_response();
     }
 
     // GetObject

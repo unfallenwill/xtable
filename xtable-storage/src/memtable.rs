@@ -175,7 +175,8 @@ impl MemTable {
         let size_delta = entry.size_bytes.max(64);
         let key = entry.key.clone();
         self.bytes_estimate.fetch_add(size_delta, Ordering::Relaxed);
-        self.earliest_seq.fetch_min(entry.wal_seq, Ordering::Relaxed);
+        self.earliest_seq
+            .fetch_min(entry.wal_seq, Ordering::Relaxed);
         self.latest_seq.fetch_max(entry.wal_seq, Ordering::Relaxed);
         let cv = entry.commit_version.load(Ordering::Acquire);
         if cv != INVISIBLE {
@@ -193,9 +194,14 @@ impl MemTable {
     #[tracing::instrument(level = "debug", skip_all, fields(op = "publish"))]
     pub fn publish(&self, key: &RecordKey, _wal_seq: u64, commit_version: u64) {
         if let Some(entry) = self.map.get(key) {
-            entry.value().commit_version.store(commit_version, Ordering::Release);
-            self.version_min.fetch_min(commit_version, Ordering::Relaxed);
-            self.version_max.fetch_max(commit_version, Ordering::Relaxed);
+            entry
+                .value()
+                .commit_version
+                .store(commit_version, Ordering::Release);
+            self.version_min
+                .fetch_min(commit_version, Ordering::Relaxed);
+            self.version_max
+                .fetch_max(commit_version, Ordering::Relaxed);
         }
     }
 
@@ -308,7 +314,13 @@ impl MemTableSet {
 
     /// Stage an entry into the active memtable. Returns the size delta
     /// and (if rotation happened) a notification that a flush may begin.
-    #[tracing::instrument(level = "info", name = "memtable.put", skip_all, fields(op = "put"), err)]
+    #[tracing::instrument(
+        level = "info",
+        name = "memtable.put",
+        skip_all,
+        fields(op = "put"),
+        err
+    )]
     pub fn put_invisible(&self, entry: MemEntry) -> XtableResult<u64> {
         let _timed = Timed::new(
             &metrics().memtable_write_duration,
@@ -377,7 +389,12 @@ impl MemTableSet {
     /// Total approximate bytes (active + immutables).
     pub async fn total_bytes(&self) -> u64 {
         let active = self.active.read().total_bytes();
-        let imm = self.flushing.lock().iter().map(|m| m.total_bytes()).sum::<u64>();
+        let imm = self
+            .flushing
+            .lock()
+            .iter()
+            .map(|m| m.total_bytes())
+            .sum::<u64>();
         active + imm
     }
 
@@ -415,8 +432,10 @@ mod tests {
         let e = make_entry("r1", 1, 100);
         mt.put_invisible(e.clone()).unwrap();
         // Invisible until publish.
-        assert!(mt.get_visible(&e.key, u64::MAX).is_none(),
-            "invisible entry should not be visible at any snapshot");
+        assert!(
+            mt.get_visible(&e.key, u64::MAX).is_none(),
+            "invisible entry should not be visible at any snapshot"
+        );
         // Publish at version 5.
         mt.publish(&e.key, 1, 5);
         // Now visible at snapshot >= 5.
@@ -459,6 +478,10 @@ mod tests {
 
         // Rotation should have occurred; active id should be > 0.
         let active = set.active.read();
-        assert!(active.id > 0, "expected rotation to bump id; got {}", active.id);
+        assert!(
+            active.id > 0,
+            "expected rotation to bump id; got {}",
+            active.id
+        );
     }
 }
