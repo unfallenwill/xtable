@@ -559,22 +559,18 @@ impl StructuredSpace {
             .get_record_index(space, table, record_id)?
             .ok_or_else(|| XtableError::not_found(format!("record {record_id}")))?;
         let backend_key = record_key(space, table, record_id)?;
-        let mut meta = HashMap::new();
-        meta.insert("x-xtable-kind".to_string(), "record".to_string());
-        meta.insert("x-xtable-space".to_string(), space.to_string());
-        meta.insert("x-xtable-table".to_string(), table.to_string());
-        meta.insert("x-xtable-record".to_string(), record_id.to_string());
-        meta.insert(
-            "x-xtable-schema-version".to_string(),
-            cur.schema_version.to_string(),
-        );
+        // Spec §5.1: drop x-xtable-* metadata — chunks don't need it.
+        // Mirrors register_schema / bind_table_schema: the tombstone is
+        // staged into the MemTable, and the flush pipeline carries it
+        // from there into a chunk. No per-record S3 PUT reads the
+        // headers, so the metadata block is dead weight.
         self.txn
             .stage(
                 &t.txn_id,
                 &ObjectKey::new(&backend_key),
                 Vec::new(),
                 Some("application/json".to_string()),
-                meta,
+                HashMap::new(),
                 true,
             )
             .await?;
