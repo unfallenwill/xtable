@@ -827,7 +827,7 @@ fn post_commit_hook(store: LocalStore, pending: Arc<PendingMap>) -> PostCommitHo
         for s in taken.schemas {
             let entry = SchemaIndexEntry {
                 latest_version: s.version,
-                latest_backend_key: s.backend_key.clone(),
+                chunk_s3_key: s.backend_key.clone(),
                 registered_ms: now_ms,
             };
             if let Err(e) = store.put_schema_index(&s.space, &s.name, &entry) {

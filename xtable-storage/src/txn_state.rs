@@ -90,8 +90,10 @@ pub struct RecordIndexEntry {
 pub struct SchemaIndexEntry {
     /// Latest schema version registered (starts at 1).
     pub latest_version: u32,
-    /// Backend S3 key of the latest schema document. Body is JSON Schema.
-    pub latest_backend_key: String,
+    /// Chunk s3_key that carries the latest schema body. Schemas ride
+    /// chunks (spec §5.1); this field is bookkeeping for the post-commit
+    /// hook, not an S3 PUT target.
+    pub chunk_s3_key: String,
     pub registered_ms: i64,
 }
 
