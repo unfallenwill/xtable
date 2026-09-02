@@ -633,103 +633,50 @@ async fn unit_v14_rebuild_fails_on_backend_error() {
 }
 
 // =========================================================================
-// V15 — SigV4 verification works
+// V15 — JWT verification works
 // =========================================================================
 
 #[test]
-fn unit_v15_sigv4_verification_works() {
+fn unit_v15_jwt_verification_works() {
+    use base64::Engine;
+    use hmac::{Hmac, Mac};
     use http::Request;
-    use sha2::{Digest, Sha256};
-    use xtable_auth::{verify_request, CredentialStore, EdgeAuth, StaticCredential};
-
-    let store = std::sync::Arc::new(CredentialStore::new());
-    store.put(
-        StaticCredential {
-            access_key_id: "ak".into(),
-            secret_access_key: "sk".into(),
-        }
-        .into_entry(),
+    use serde_json::json;
+    use sha2::Sha256;
+    use xtable_auth::{verify_request, EdgeAuth};
+    type HmacSha256 = Hmac<Sha256>;
+    let header =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&json!({"sub":"u1","exp":4_000_000_000i64})).unwrap());
+    let input = format!("{header}.{payload}");
+    let mut mac = HmacSha256::new_from_slice(b"secret").unwrap();
+    mac.update(input.as_bytes());
+    let jwt = format!(
+        "{input}.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
     );
-    let auth = EdgeAuth {
-        creds: store,
-        allow_anonymous_read: false,
-        region: "us-east-1".into(),
-    };
-
-    // Build a properly-signed SigV4 request.
-    let body = b"";
-    let payload_hash = hex::encode(Sha256::digest(body));
-    let date = "20260101T000000Z";
-    let date_short = "20260101";
-    let region = "us-east-1";
-    let service = "s3";
-    let host = "example.com";
-    let canonical_uri = "/foo";
-    let signed_headers = "host;x-amz-content-sha256;x-amz-date";
-    let canonical_headers = format!(
-        "host:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
-        host, payload_hash, date
-    );
-    let canonical_request = format!(
-        "GET\n{}\n\n{}\n{}\n{}",
-        canonical_uri, canonical_headers, signed_headers, payload_hash
-    );
-    let canonical_request_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
-    let scope = format!("{}/{}/{}/aws4_request", date_short, region, service);
-    let string_to_sign = format!(
-        "AWS4-HMAC-SHA256\n{}\n{}\n{}",
-        date, scope, canonical_request_hash
-    );
-
-    fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-        type HmacSha256 = Hmac<Sha256>;
-        let mut mac = HmacSha256::new_from_slice(key).expect("hmac");
-        mac.update(msg);
-        let r = mac.finalize().into_bytes();
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&r);
-        out
-    }
-
-    let k_secret = format!("AWS4sk");
-    let k_date = hmac_sha256(k_secret.as_bytes(), date_short.as_bytes());
-    let k_region = hmac_sha256(&k_date, region.as_bytes());
-    let k_service = hmac_sha256(&k_region, service.as_bytes());
-    let k_signing = hmac_sha256(&k_service, b"aws4_request");
-    let signature = hex::encode(hmac_sha256(&k_signing, string_to_sign.as_bytes()));
-    let auth_header = format!(
-        "AWS4-HMAC-SHA256 Credential=ak/{}/{}, SignedHeaders={}, Signature={}",
-        date_short, scope, signed_headers, signature
-    );
+    let auth = EdgeAuth::new("secret", None, None, false);
 
     let req = Request::builder()
         .uri("/foo")
-        .header("host", host)
-        .header("x-amz-date", date)
-        .header("x-amz-content-sha256", &payload_hash)
-        .header("authorization", &auth_header)
+        .header("authorization", format!("Bearer {jwt}"))
         .body(())
         .unwrap();
     assert!(
         verify_request(&auth, &req, false).is_ok(),
-        "valid SigV4 must pass"
+        "valid JWT must pass"
     );
 
-    // Tamper with signature — must reject.
-    let bad = auth_header.replace(&signature, &"0".repeat(64));
+    let bad = format!("{}0", &jwt[..jwt.len() - 1]);
     let req2 = Request::builder()
         .uri("/foo")
-        .header("host", host)
-        .header("x-amz-date", date)
-        .header("x-amz-content-sha256", &payload_hash)
-        .header("authorization", &bad)
+        .header("authorization", format!("Bearer {bad}"))
         .body(())
         .unwrap();
     assert!(
         verify_request(&auth, &req2, false).is_err(),
-        "bad signature must fail"
+        "bad JWT signature must fail"
     );
 }
 

@@ -95,6 +95,10 @@ pub struct TxnCoordinator {
     memtable_set: Arc<MemTableSet>,
     /// Post-commit hooks (e.g., index maintenance for the structured-data-space layer).
     post_commit_hooks: Arc<std::sync::RwLock<Vec<PostCommitHook>>>,
+    /// Serialize commit and abort state-machine transitions within this
+    /// coordinator. The durable compare-and-set in LocalStore also protects
+    /// callers that use more than one coordinator instance for a store.
+    commit_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl std::fmt::Debug for TxnCoordinator {
@@ -122,6 +126,7 @@ impl TxnCoordinator {
                 xtable_storage::FlushPolicy::default(),
             ),
             post_commit_hooks: Arc::new(std::sync::RwLock::new(Vec::new())),
+            commit_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -143,6 +148,7 @@ impl TxnCoordinator {
             lock_manager,
             memtable_set,
             post_commit_hooks: Arc::new(std::sync::RwLock::new(Vec::new())),
+            commit_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -156,6 +162,16 @@ impl TxnCoordinator {
 
     pub fn store(&self) -> &LocalStore {
         &self.store
+    }
+
+    /// Return the exact snapshot captured for a transaction. Structured
+    /// callers must use this value rather than sampling the global counter a
+    /// second time after `begin`.
+    pub fn transaction_snapshot(&self, txn_id: &str) -> XtableResult<u64> {
+        self.store
+            .get_txn_state(txn_id)?
+            .map(|state| state.snapshot_version)
+            .ok_or_else(|| TxnError::UnknownTxn(txn_id.to_string()).into())
     }
 
     pub fn backend(&self) -> &BackendClient {
@@ -198,21 +214,34 @@ impl TxnCoordinator {
         );
         let txn_id = Self::next_txn_id();
         tracing::Span::current().record("txn.id", tracing::field::display(&txn_id));
-        let snapshot_version = self.store.current_global_version()?;
+        // Capture and pin the exact snapshot in one storage transaction. A
+        // separate current_global_version()+register_snapshot() pair lets GC
+        // race a reader between those operations.
+        let snapshot_version = self.store.capture_and_register_snapshot()?;
         let now_ms = Utc::now().timestamp_millis();
         let rec = TxnStateRecord::new_active(snapshot_version, idempotency_key.clone(), now_ms);
-        self.store.put_txn_state(&txn_id, &rec)?;
+        if let Err(err) = self.store.put_txn_state(&txn_id, &rec) {
+            let _ = self.store.unregister_snapshot(snapshot_version);
+            return Err(err);
+        }
         // PR-Fix1.1: register the txn in the SI lock manager so that
         // `register_read` / `register_write` / `find_dangerous_structure`
         // see it. Without this the lock manager stays empty and SSI is dead.
-        self.lock_manager.begin_txn(&txn_id, snapshot_version)?;
-        // MVCC: register the snapshot so it pins old versions from GC.
-        self.store.register_snapshot(snapshot_version)?;
-        self.store.append_wal(&WalRecord::Begin {
+        if let Err(err) = self.lock_manager.begin_txn(&txn_id, snapshot_version) {
+            let _ = self.store.unregister_snapshot(snapshot_version);
+            let _ = self.store.delete_txn_state(&txn_id);
+            return Err(err);
+        }
+        if let Err(err) = self.store.append_wal(&WalRecord::Begin {
             txn_id: txn_id.clone(),
             snapshot_version,
             idempotency_key,
-        })?;
+        }) {
+            self.lock_manager.mark_aborted(&txn_id);
+            let _ = self.store.unregister_snapshot(snapshot_version);
+            let _ = self.store.delete_txn_state(&txn_id);
+            return Err(err);
+        }
         debug!(txn = %txn_id, version = snapshot_version, "BeginTxn");
         metrics()
             .txn_begin_total
@@ -332,10 +361,21 @@ impl TxnCoordinator {
         err,
     )]
     pub async fn commit(&self, txn_id: &str) -> XtableResult<CommitOutcome> {
+        let _commit_guard = self.commit_lock.lock().await;
         let m = metrics();
         m.txn_commit_active.add(1, &[KeyValue::new("op", "commit")]);
         let _timed = Timed::new(&m.txn_commit_duration, vec![KeyValue::new("op", "commit")]);
-        let result = self.commit_inner(txn_id).await;
+        let mut owns_committing_state = false;
+        let result = self.commit_inner(txn_id, &mut owns_committing_state).await;
+        if owns_committing_state {
+            if let Err(err) = &result {
+                // Do not leave a transaction permanently in Committing when a
+                // fallible step fails. If the atomic chain append already landed,
+                // the durable outcome is committed; otherwise it is safe to
+                // abort and release the snapshot pin.
+                self.reconcile_failed_commit(txn_id, err);
+            }
+        }
         m.txn_commit_active
             .add(-1, &[KeyValue::new("op", "commit")]);
         m.txn_commit_total.add(
@@ -348,7 +388,55 @@ impl TxnCoordinator {
         result
     }
 
-    async fn commit_inner(&self, txn_id: &str) -> XtableResult<CommitOutcome> {
+    fn reconcile_failed_commit(&self, txn_id: &str, cause: &XtableError) {
+        let Ok(Some(mut txn)) = self.store.get_txn_state(txn_id) else {
+            return;
+        };
+        if txn.status != TxnStatus::Committing {
+            return;
+        }
+
+        let published = !txn.alloc_versions.is_empty()
+            && txn.alloc_versions.iter().all(|(key, version)| {
+                self.store
+                    .read_chain(key)
+                    .map(|chain| {
+                        chain
+                            .entries
+                            .iter()
+                            .any(|entry| entry.txn_id == txn_id && entry.commit_version == *version)
+                    })
+                    .unwrap_or(false)
+            });
+
+        if published {
+            let commit_version = txn
+                .alloc_versions
+                .iter()
+                .map(|(_, version)| *version)
+                .max()
+                .unwrap_or(txn.snapshot_version);
+            txn.status = TxnStatus::Committed;
+            let _ = self.store.put_txn_state(txn_id, &txn);
+            self.lock_manager.mark_committed(txn_id, commit_version);
+            let _ = self.store.unregister_snapshot(txn.snapshot_version);
+        } else {
+            let _ = self.store.append_wal(&WalRecord::Aborted {
+                txn_id: txn_id.to_string(),
+                reason: format!("commit failed before publish: {cause}"),
+            });
+            txn.status = TxnStatus::Aborted;
+            let _ = self.store.put_txn_state(txn_id, &txn);
+            self.lock_manager.mark_aborted(txn_id);
+            let _ = self.store.unregister_snapshot(txn.snapshot_version);
+        }
+    }
+
+    async fn commit_inner(
+        &self,
+        txn_id: &str,
+        owns_committing_state: &mut bool,
+    ) -> XtableResult<CommitOutcome> {
         // 1. Idempotent replay.
         if let Some(rec) = self.store.get_txn_state(txn_id)? {
             if rec.status == TxnStatus::Committed {
@@ -374,11 +462,60 @@ impl TxnCoordinator {
             return Err(TxnError::UnknownTxn(txn_id.to_string()).into());
         }
 
+        // Make the state transition durable and conditional. This protects
+        // against a second coordinator instance committing the same txn after
+        // both instances have read the old Active row.
+        if !self.store.compare_and_set_txn_status(
+            txn_id,
+            TxnStatus::Active,
+            TxnStatus::Committing,
+        )? {
+            let state = self
+                .store
+                .get_txn_state(txn_id)?
+                .ok_or_else(|| TxnError::UnknownTxn(txn_id.to_string()))?;
+            return match state.status {
+                TxnStatus::Committed => {
+                    let v = state
+                        .alloc_versions
+                        .iter()
+                        .map(|(_, v)| *v)
+                        .max()
+                        .unwrap_or(state.snapshot_version);
+                    Ok(CommitOutcome { commit_version: v })
+                }
+                TxnStatus::Aborted => Err(TxnError::Aborted("txn already aborted".into()).into()),
+                status => Err(TxnError::InvalidState(format!("txn in {:?} state", status)).into()),
+            };
+        }
+        *owns_committing_state = true;
         let mut txn = self
             .store
             .get_txn_state(txn_id)?
             .ok_or_else(|| TxnError::UnknownTxn(txn_id.to_string()))?;
         let write_entries = self.store.iter_write_set(txn_id)?;
+
+        // Materialize spill files before the chain publish. The memtable is
+        // the source for the eventual chunk, so publishing an empty body for
+        // a large staged value would make the value disappear after flush.
+        // Doing this before chain append also lets the normal failure
+        // reconciliation abort without leaving a committed chain entry.
+        let mut staged_bodies: HashMap<String, bytes::Bytes> = HashMap::new();
+        for (key, write_entry) in &write_entries {
+            let body = match &write_entry.inline_body {
+                Some(body) => bytes::Bytes::copy_from_slice(body),
+                None => match &write_entry.body_handle {
+                    Some(handle) => {
+                        let blob = self.store.get_blob(handle)?.ok_or_else(|| {
+                            XtableError::Storage(format!("staged blob missing: {handle}"))
+                        })?;
+                        bytes::Bytes::from(tokio::fs::read(&blob.path).await?)
+                    }
+                    None => bytes::Bytes::new(),
+                },
+            };
+            staged_bodies.insert(key.clone(), body);
+        }
 
         // PR #4: Cahill cycle detection. Reads in-edges and out-edges on
         // this txn; if any peer appears in both, abort.
@@ -394,9 +531,6 @@ impl TxnCoordinator {
             let _ = self.store.unregister_snapshot(txn.snapshot_version);
             return Err(TxnError::Conflict(format!("SSI cycle with {}", peer)).into());
         }
-
-        txn.status = TxnStatus::Committing;
-        self.store.put_txn_state(txn_id, &txn)?;
 
         // 4. Allocate new versions per key. Sort for deterministic ordering.
         let mut sorted_keys: Vec<String> = txn.write_keys.clone();
@@ -552,13 +686,7 @@ impl TxnCoordinator {
         // Non-structured keys fall back to ("" , "" , key) so they stay
         // isolated from the structured-data path.
         for (key, we) in &write_entries {
-            let body = match &we.inline_body {
-                Some(b) => bytes::Bytes::copy_from_slice(b.as_slice()),
-                None => match &we.body_handle {
-                    Some(_) => bytes::Bytes::new(), // spill file — not loaded here
-                    None => bytes::Bytes::new(),
-                },
-            };
+            let body = staged_bodies.get(key).cloned().unwrap_or_default();
             let (space, table, record_id) = parse_record_key(key)
                 .unwrap_or_else(|| (String::new(), String::new(), key.clone()));
             let mem_key: xtable_storage::memtable::RecordKey = (space, table, record_id);
@@ -635,6 +763,7 @@ impl TxnCoordinator {
         err,
     )]
     pub async fn abort(&self, txn_id: &str) -> XtableResult<()> {
+        let _commit_guard = self.commit_lock.lock().await;
         let m = metrics();
         let _timed = Timed::new(&m.txn_abort_duration, vec![KeyValue::new("op", "abort")]);
         let result = self.abort_inner(txn_id).await;
@@ -649,12 +778,26 @@ impl TxnCoordinator {
     }
 
     async fn abort_inner(&self, txn_id: &str) -> XtableResult<()> {
-        let mut txn = match self.store.get_txn_state(txn_id)? {
+        let txn = match self.store.get_txn_state(txn_id)? {
             Some(t) => t,
             None => return Err(TxnError::UnknownTxn(txn_id.to_string()).into()),
         };
         if txn.status == TxnStatus::Committed {
             return Err(TxnError::InvalidState("txn already committed".into()).into());
+        }
+        if txn.status == TxnStatus::Aborted {
+            return Ok(());
+        }
+        if txn.status != TxnStatus::Active {
+            return Err(
+                TxnError::InvalidState(format!("txn not abortable: {:?}", txn.status)).into(),
+            );
+        }
+        if !self
+            .store
+            .compare_and_set_txn_status(txn_id, TxnStatus::Active, TxnStatus::Aborted)?
+        {
+            return Err(TxnError::InvalidState("txn state changed while aborting".into()).into());
         }
         // Drop staged blobs.
         let writes = self.store.iter_write_set(txn_id)?;
@@ -673,8 +816,7 @@ impl TxnCoordinator {
         })?;
         // MVCC: release the snapshot pin.
         let _ = self.store.unregister_snapshot(txn.snapshot_version);
-        txn.status = TxnStatus::Aborted;
-        self.store.put_txn_state(txn_id, &txn)?;
+        self.lock_manager.mark_aborted(txn_id);
         Ok(())
     }
 
@@ -826,6 +968,29 @@ mod tests {
         assert_eq!(out.commit_version, 0);
         let out2 = coord.commit(&t).await.unwrap();
         assert_eq!(out2.commit_version, 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_commit_calls_are_idempotent() {
+        let (coord, _tmp) = build_for_test().await;
+        let t = coord.begin(None).await.unwrap();
+        coord
+            .stage(
+                &t,
+                &ObjectKey::new("k"),
+                b"value".to_vec(),
+                None,
+                HashMap::new(),
+                false,
+            )
+            .await
+            .unwrap();
+
+        let (first, second) = tokio::join!(coord.commit(&t), coord.commit(&t));
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(first.commit_version, second.commit_version);
+        assert_eq!(coord.store().read_chain("k").unwrap().entries.len(), 1);
     }
 
     #[tokio::test]

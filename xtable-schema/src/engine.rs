@@ -125,6 +125,7 @@ struct PendingRecord {
     record_id: String,
     schema_version: u32,
     body: Value,
+    deleted: bool,
     backend_key: String,
 }
 
@@ -232,7 +233,10 @@ impl StructuredSpace {
 
     pub async fn begin_txn(self: &Arc<Self>) -> XtableResult<StructuredTxn> {
         let txn_id = self.txn.begin(None).await?;
-        let snapshot_version = self.store.current_global_version()?;
+        // Coordinator begin captured and pinned this exact snapshot. Do not
+        // sample the global counter again: a concurrent commit here would
+        // make the structured handle read newer data than its SI pin.
+        let snapshot_version = self.txn.transaction_snapshot(&txn_id)?;
         Ok(StructuredTxn {
             txn_id,
             snapshot_version,
@@ -370,12 +374,17 @@ impl StructuredSpace {
         version: Option<u32>,
         snapshot: Option<u64>,
     ) -> XtableResult<Option<SchemaInfo>> {
-        let _snap = snapshot.unwrap_or(txn.snapshot_version);
+        let snap = snapshot.unwrap_or(txn.snapshot_version);
         let idx = match self.store.get_schema_index(space, name)? {
             Some(i) => i,
             None => return Ok(None),
         };
-        let effective = version.unwrap_or(idx.latest_version);
+        let effective = match version {
+            Some(version) => version,
+            None => self
+                .latest_schema_version_at_snapshot(space, name, snap)?
+                .unwrap_or(0),
+        };
         if effective == 0 || effective > idx.latest_version {
             return Ok(None);
         }
@@ -392,7 +401,7 @@ impl StructuredSpace {
             space,
             "_schema",
             &schema_record_id,
-            _snap,
+            snap,
         )
         .await?;
         let body: Value = match r {
@@ -416,9 +425,12 @@ impl StructuredSpace {
         let snap = _txn.snapshot_version;
         let mut out = Vec::new();
         for (name, _idx) in self.store.iter_schema_index(space)? {
+            let Some(version) = self.latest_schema_version_at_snapshot(space, &name, snap)? else {
+                continue;
+            };
             // Per spec §5.2 schema bodies live in chunks. Resolve via the
             // LSM read path under `(space, "_schema", "{name}/v{N}.json")`.
-            let schema_record_id = format!("{name}/v{}.json", _idx.latest_version);
+            let schema_record_id = format!("{name}/v{version}.json");
             let r = xtable_storage::read::read_at_snapshot(
                 &self.mems,
                 &self.store,
@@ -435,7 +447,7 @@ impl StructuredSpace {
             out.push(SchemaInfo {
                 space: space.to_string(),
                 name,
-                version: _idx.latest_version,
+                version,
                 body,
             });
         }
@@ -482,32 +494,33 @@ impl StructuredSpace {
             // in that order. Never issue a per-record `backend.get_object`
             // against the legacy `_xtable/<space>/_schema/...` key — that
             // key no longer exists after the chunk-only refactor.
-            let body_value =
-                if let Some(b) = self.table_schema_body(&t.txn_id, &space, &table, sv)? {
-                    b
-                } else {
-                    let alias_name = format!("_table::{table}");
-                    let schema_record_id = format!("{alias_name}/v{sv}.json");
-                    let r = xtable_storage::read::read_at_snapshot(
-                        &self.mems,
-                        &self.store,
-                        &self.backend,
-                        &space,
-                        "_schema",
-                        &schema_record_id,
-                        t.snapshot_version,
-                    )
-                    .await?;
-                    match r {
-                        Some(rr) => serde_json::from_slice(&rr.body)
-                            .map_err(|e| XtableError::Serde(format!("schema body parse: {e}")))?,
-                        None => {
-                            return Err(XtableError::InvalidArgument(format!(
-                                "schema body not found for {space}/{alias_name} v{sv}"
-                            )))
-                        }
+            let body_value = if let Some(b) =
+                self.table_schema_body(&t.txn_id, &space, &table, sv, t.snapshot_version)?
+            {
+                b
+            } else {
+                let alias_name = format!("_table::{table}");
+                let schema_record_id = format!("{alias_name}/v{sv}.json");
+                let r = xtable_storage::read::read_at_snapshot(
+                    &self.mems,
+                    &self.store,
+                    &self.backend,
+                    &space,
+                    "_schema",
+                    &schema_record_id,
+                    t.snapshot_version,
+                )
+                .await?;
+                match r {
+                    Some(rr) => serde_json::from_slice(&rr.body)
+                        .map_err(|e| XtableError::Serde(format!("schema body parse: {e}")))?,
+                    None => {
+                        return Err(XtableError::InvalidArgument(format!(
+                            "schema body not found for {space}/{alias_name} v{sv}"
+                        )))
                     }
-                };
+                }
+            };
             let schema = JsonSchema(body_value);
             validate(&schema, &write.body).map_err(schema_validation_err)?;
         }
@@ -543,6 +556,7 @@ impl StructuredSpace {
                 record_id: record_id.clone(),
                 schema_version: schema_version.unwrap_or(0),
                 body: write.body,
+                deleted: false,
                 backend_key: backend_key.clone(),
             },
         );
@@ -592,6 +606,7 @@ impl StructuredSpace {
                 record_id: record_id.to_string(),
                 schema_version: cur.schema_version,
                 body: Value::Null,
+                deleted: true,
                 backend_key,
             },
         );
@@ -663,10 +678,7 @@ impl StructuredSpace {
         );
         let snap = snapshot.unwrap_or(txn.snapshot_version);
         let mut records: Vec<Record> = Vec::new();
-        for (rid, idx, body) in self.store_iter_with_body(space, table)? {
-            if idx.commit_version > snap {
-                continue;
-            }
+        for (rid, idx, body) in self.store_iter_with_body(space, table, snap)? {
             // PR-Fix8.3: capture ReadSet per visible record.
             let key_str = record_key(space, table, &rid)?;
             txn.record_read(ObjectKey::new(&key_str), idx.commit_version);
@@ -754,7 +766,6 @@ impl StructuredSpace {
         snapshot: u64,
     ) -> XtableResult<Option<u32>> {
         let alias_name = format!("_table::{table}");
-        let _ = snapshot;
         // Pending (in this txn, not yet committed) wins over the index.
         if let Some(v) = self
             .pending
@@ -762,10 +773,7 @@ impl StructuredSpace {
         {
             return Ok(Some(v));
         }
-        Ok(self
-            .store
-            .get_schema_index(space, &alias_name)?
-            .map(|i| i.latest_version))
+        self.latest_schema_version_at_snapshot(space, &alias_name, snapshot)
     }
 
     /// Fetch the table's schema body, consulting pending writes first.
@@ -775,6 +783,7 @@ impl StructuredSpace {
         space: &str,
         table: &str,
         schema_version: u32,
+        snapshot: u64,
     ) -> XtableResult<Option<Value>> {
         let alias_name = format!("_table::{table}");
         if let Some(v) = self
@@ -792,26 +801,87 @@ impl StructuredSpace {
         // `backend.get_object` against the legacy `_xtable/<space>/_schema/...`
         // key — that key no longer exists post-refactor.
         let record_id = format!("{alias_name}/v{schema_version}.json");
-        if let Ok(Some((_entry, body))) = self
+        if let Some((_entry, body)) = self
+            .store
+            .get_record_version_at_snapshot(space, "_schema", &record_id, snapshot)?
+        {
+            if body.is_empty() {
+                return Ok(None);
+            }
+            return serde_json::from_slice(&body)
+                .map(Some)
+                .map_err(|e| XtableError::Serde(format!("schema body parse: {e}")));
+        }
+        if let Ok(Some((entry, body))) = self
             .store
             .get_record_index_with_body(space, "_schema", &record_id)
         {
-            if !body.is_null() {
+            if entry.commit_version <= snapshot && !body.is_null() {
                 return Ok(Some(body));
             }
         }
         Ok(None)
     }
 
+    fn latest_schema_version_at_snapshot(
+        &self,
+        space: &str,
+        name: &str,
+        snapshot: u64,
+    ) -> XtableResult<Option<u32>> {
+        let prefix = format!("{name}/v");
+        let mut best = None;
+        for (record_id, latest) in self.store.iter_record_index(space, "_schema")? {
+            let Some(version_text) = record_id
+                .strip_prefix(&prefix)
+                .and_then(|v| v.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            let Ok(version) = version_text.parse::<u32>() else {
+                continue;
+            };
+            let visible = match self
+                .store
+                .get_record_version_at_snapshot(space, "_schema", &record_id, snapshot)?
+            {
+                Some((entry, _)) => !entry.deleted,
+                None => latest.commit_version <= snapshot && !latest.deleted,
+            };
+            if visible && best.map(|current| version > current).unwrap_or(true) {
+                best = Some(version);
+            }
+        }
+        Ok(best)
+    }
+
     fn store_iter_with_body(
         &self,
         space: &str,
         table: &str,
+        snapshot: u64,
     ) -> XtableResult<Vec<(String, RecordIndexEntry, Value)>> {
         let mut out = Vec::new();
         for rid in self.store.iter_record_index(space, table)? {
             let (rid, idx) = rid;
-            // load body
+            if let Some((historical, raw_body)) = self
+                .store
+                .get_record_version_at_snapshot(space, table, &rid, snapshot)?
+            {
+                let body = if raw_body.is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::from_slice(&raw_body)
+                        .map_err(|e| XtableError::Serde(format!("record body parse: {e}")))?
+                };
+                out.push((rid, historical, body));
+                continue;
+            }
+            // Compatibility path for rows written before the historical
+            // index existed.
+            if idx.commit_version > snapshot {
+                continue;
+            }
             let (_e, body) = self
                 .store
                 .get_record_index_with_body(space, table, &rid)?
@@ -836,7 +906,7 @@ fn post_commit_hook(store: LocalStore, pending: Arc<PendingMap>) -> PostCommitHo
             let v = pick_record_version(&ev.writes, &r.backend_key, 0);
             let entry = RecordIndexEntry {
                 commit_version: v,
-                deleted: r.body.is_null(),
+                deleted: r.deleted,
                 chunk_id: r.backend_key.clone(),
                 schema_version: r.schema_version,
                 txn_id: ev.txn_id.clone(),
@@ -938,8 +1008,7 @@ impl StructuredSpace {
     /// Pin the current global version and return a reader. The pin is
     /// released when the reader is dropped.
     pub fn acquire_snapshot(&self) -> XtableResult<StructuredReader> {
-        let snap = self.store.current_global_version()?;
-        self.store.register_snapshot(snap)?;
+        let snap = self.store.capture_and_register_snapshot()?;
         let txn_id = format!("pin-{}", ulid::Ulid::new());
         Ok(StructuredReader {
             _txn_id: txn_id,
@@ -1023,6 +1092,30 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(info.version, 3);
+    }
+
+    #[tokio::test]
+    async fn get_schema_without_version_uses_snapshot_visible_version() {
+        let (sp, _t) = setup().await;
+        let t1 = sp.begin_txn().await.unwrap();
+        sp.register_schema(&t1, "s", "task", json!({"version": 1}))
+            .await
+            .unwrap();
+        let s1 = sp.commit_txn(&t1).await.unwrap();
+
+        let t2 = sp.begin_txn().await.unwrap();
+        sp.register_schema(&t2, "s", "task", json!({"version": 2}))
+            .await
+            .unwrap();
+        sp.commit_txn(&t2).await.unwrap();
+
+        let info = sp
+            .get_schema(&StructuredTxn::admin(), "s", "task", None, Some(s1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(info.version, 1);
+        assert_eq!(info.body["version"], 1);
     }
 
     #[tokio::test]
@@ -1204,6 +1297,75 @@ mod tests {
         let diff = sp.diff(&StructuredTxn::admin(), "s", "t", s1, s2).unwrap();
         assert_eq!(diff.len(), 1);
         assert_eq!(diff[0].0, "r");
+    }
+
+    #[tokio::test]
+    async fn structured_reads_select_historical_record_version() {
+        let (sp, _t) = setup().await;
+
+        let t1 = sp.begin_txn().await.unwrap();
+        sp.upsert_record(
+            &t1,
+            RecordWrite {
+                space: "s".into(),
+                table: "t".into(),
+                record_id: Some("r".into()),
+                body: json!({"value": 1}),
+            },
+        )
+        .await
+        .unwrap();
+        let s1 = sp.commit_txn(&t1).await.unwrap();
+
+        let t2 = sp.begin_txn().await.unwrap();
+        sp.upsert_record(
+            &t2,
+            RecordWrite {
+                space: "s".into(),
+                table: "t".into(),
+                record_id: Some("r".into()),
+                body: json!({"value": 2}),
+            },
+        )
+        .await
+        .unwrap();
+        let s2 = sp.commit_txn(&t2).await.unwrap();
+
+        let old = sp
+            .get_record(&StructuredTxn::admin(), "s", "t", "r", Some(s1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(old.commit_version, s1);
+        assert_eq!(old.body["value"], 1);
+
+        let current = sp
+            .get_record(&StructuredTxn::admin(), "s", "t", "r", Some(s2))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.commit_version, s2);
+        assert_eq!(current.body["value"], 2);
+
+        let result = sp
+            .query_records(&StructuredTxn::admin(), "s", "t", Query::new(), Some(s1))
+            .unwrap();
+        assert_eq!(result.records.len(), 1);
+        assert_eq!(result.records[0].body["value"], 1);
+
+        let t3 = sp.begin_txn().await.unwrap();
+        sp.delete_record(&t3, "s", "t", "r").await.unwrap();
+        let s3 = sp.commit_txn(&t3).await.unwrap();
+        assert!(sp
+            .get_record(&StructuredTxn::admin(), "s", "t", "r", Some(s2))
+            .await
+            .unwrap()
+            .is_some());
+        assert!(sp
+            .get_record(&StructuredTxn::admin(), "s", "t", "r", Some(s3))
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

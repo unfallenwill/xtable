@@ -110,6 +110,15 @@ pub struct StoredRecord {
     pub body_json: String,
 }
 
+/// Durable historical structured-record row.  The body is kept as raw bytes
+/// so rebuilds do not have to reinterpret JSON and a legitimate JSON `null`
+/// remains distinguishable from an empty tombstone body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredRecordVersion {
+    pub entry: RecordIndexEntry,
+    pub body: Vec<u8>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

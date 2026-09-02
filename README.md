@@ -4,7 +4,7 @@
 
 ```
 [ client / curl / sdk ]
-        │  HTTPS + SigV4 + /v1/spaces/...
+        │  HTTPS + JWT + /v1/spaces/...
         ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ xtable-server (Rust, single binary)                          │
@@ -21,7 +21,7 @@
 │           └────── LocalStore (redb) ──────────────────────────│
 │             WAL · versions · txn_state · SI locks · chunks    │
 └──────────────────────┬──────────────────────────────────────┘
-                       │ SigV4
+                       │ S3 credentials
                        ▼
              ┌──────────────────────┐
              │  S3 backend          │
@@ -68,7 +68,7 @@ schema to an object. xtable adds:
 | `xtable-core`    | Pure types: `ObjectKey`, `TxnId`, `Version`, errors, config schemas, transaction status enum. No IO. |
 | `xtable-storage` | `redb`-backed local state: WAL, version index, txn_state, SI locks (`TBL_SI_READ` / `TBL_SI_WRITE` / edges / recent window), chunks (`TBL_CHUNK_INDEX`), MemTable, flush pipeline. |
 | `xtable-backend` | `aws-sdk-s3` client + multipart upload + `KeyMap` for talking to user-provided S3. |
-| `xtable-auth`    | SigV4 edge verification, `EdgeAuth`, `CredentialStore`. |
+| `xtable-auth`    | JWT verification for the HTTP API. |
 | `xtable-tx`      | `TxnCoordinator` MVCC + SSI state machine: `Begin` / `Stage` / `Commit` (with Cahill cycle check) / `Abort`. Plus `recovery` (WAL replay) / `rebuild` (cold rebuild from S3 metadata) / `gc` (sweep stale txns). Hosts the `SiLockManager` and `cahill` cycle detection. |
 | `xtable-schema`  | Structured-data-space layer: schema registration, table binding, record read/write/diff. Threads `StructuredTxn` through every read for SSI ReadSet capture. |
 | `xtable-server`  | `xtable` binary: axum HTTP server, `/v1/spaces/...` routes, lifecycle, GC task, background flush loop. |
@@ -77,7 +77,7 @@ schema to an object. xtable adds:
 ### Request flow
 
 ```
-                HTTP request (SigV4)
+                HTTP request (JWT)
                         │
                         ▼
                 axum router
@@ -320,7 +320,7 @@ write cache, or equivalent) and run periodic fsync of the redb WAL file.
 
 ## API surface
 
-All routes are mounted under `/v1` and require SigV4 authentication. Health
+All routes are mounted under `/v1` and require JWT authentication. Health
 probes (`/healthz`, `/readyz`) are public.
 
 ### Schemas
@@ -379,13 +379,51 @@ cargo test --workspace
 
 # Talk to the structured-data-space API
 curl -X POST http://localhost:9000/v1/spaces/acme/schemas \
+  -H 'authorization: Bearer <jwt>' \
   -H 'content-type: application/json' \
   -d '{"name":"task","body":{"type":"object","required":["title","status"],"properties":{"title":{"type":"string"},"status":{"enum":["open","done"]}}}}'
 
 curl -X POST http://localhost:9000/v1/spaces/acme/tables/tasks/records \
+  -H 'authorization: Bearer <jwt>' \
   -H 'content-type: application/json' \
   -d '{"record_id":"t1","body":{"title":"alpha","status":"open"}}'
 ```
+
+## Iteration check
+
+Run the whole workspace validation in one shot after each iteration — agent
+loop, local edit, or pre-push. The script is non-interactive, prints one
+section per step, and exits non-zero on the first failed step.
+
+```bash
+./scripts/ci.sh
+```
+
+It runs, in order:
+
+| step    | command                                                |
+|---------|--------------------------------------------------------|
+| `fmt`     | `cargo fmt --all -- --check`                         |
+| `build`   | `cargo build --workspace --all-targets --all-features` |
+| `clippy`  | `cargo clippy --workspace --all-targets --all-features -- -D warnings` |
+| `test`    | `cargo test --workspace --all-features`              |
+| `smoke`   | `cargo test -p xtable-server --test structured_http` (unignored) |
+
+Each step is gated independently so a single failure surfaces immediately
+with its exit code and elapsed seconds. Useful flags:
+
+```bash
+./scripts/ci.sh --skip fmt              # skip one step
+./scripts/ci.sh --skip=clippy --skip=test
+./scripts/ci.sh --include-ignored       # also run #[ignore]'d structured_http tests
+                                        # (these are gated on Task 4 and may fail)
+./scripts/ci.sh --help                  # full help
+```
+
+Exit codes: `0` all passed, `1` a step failed, `77` a step was skipped.
+
+If `cargo` is not on `PATH`, the script sources `~/.cargo/env` automatically
+(handy right after a `rustup` install with `--no-modify-path`).
 
 ---
 
@@ -507,7 +545,7 @@ reducing S3 request count by ~1000×.
 
 ## Security notes (v1 scope)
 
-- **Auth**: SigV4 at the edge; credentials stored in config / env.
+- **Auth**: HS256 JWT for the HTTP API; the signing secret is stored in config / env.
   Multi-tenant auth is planned for v2.
 - **Transport**: HTTPS only in production (xtable binds to TCP; TLS is
   the operator's responsibility via reverse proxy or rustls integration

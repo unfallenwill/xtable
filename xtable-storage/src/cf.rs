@@ -57,6 +57,13 @@ pub const TBL_MULTIPART: TableDefinition<&str, &[u8]> = TableDefinition::new("xt
 pub const TBL_RECORD_INDEX: TableDefinition<(&str, &str, &str), &[u8]> =
     TableDefinition::new("xtable.record_index");
 
+/// Historical record index for structured MVCC reads.
+/// Key = (space, table, record_id, commit_version).  Unlike
+/// `TBL_RECORD_INDEX`, this table retains one row per committed version so a
+/// reader can select the newest row visible at its snapshot.
+pub const TBL_RECORD_VERSIONS: TableDefinition<(&str, &str, &str, u64), &[u8]> =
+    TableDefinition::new("xtable.record_versions");
+
 /// Schema index for structured-data-space layer.
 /// Key = (space, schema_name) → bincode [`SchemaIndexEntry`].
 /// Tracks the latest versioned schema document.

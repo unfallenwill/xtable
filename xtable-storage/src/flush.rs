@@ -265,7 +265,16 @@ fn update_record_index_after_flush(
         if cv == crate::memtable::INVISIBLE {
             continue;
         }
-        store.update_record_index_chunk_id(&e.key.0, &e.key.1, &e.key.2, new_chunk_id)?;
+        // Update only the exact version emitted by this memtable. An older
+        // immutable can flush after a newer commit and must not move the
+        // latest-row pointer back to its older chunk.
+        store.update_record_index_chunk_id_for_version(
+            &e.key.0,
+            &e.key.1,
+            &e.key.2,
+            cv,
+            new_chunk_id,
+        )?;
     }
     Ok(())
 }

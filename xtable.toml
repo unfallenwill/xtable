@@ -9,8 +9,7 @@ log_level = "info"
 shutdown_grace_secs = 30
 
 [auth]
-edge_access_key_id = "xtableadmin"
-edge_secret_access_key = "changeme"
+jwt_secret = "changeme" # replace in production or inject XTABLE_AUTH__JWT_SECRET
 allow_anonymous_read = false
 
 [backend]

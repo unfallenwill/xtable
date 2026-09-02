@@ -154,3 +154,59 @@ async fn rebuild_reads_records_from_chunks() {
         "TBL_CHUNK_INDEX must contain chunk B"
     );
 }
+
+#[tokio::test]
+async fn rebuild_preserves_historical_versions_for_snapshot_reads() {
+    let tmp = TempDir::new().unwrap();
+    let store = LocalStore::open_path(&tmp.path().join("xt.redb")).unwrap();
+    let backend = BackendClient::dummy_for_test_async().await.unwrap();
+
+    let old_chunk = make_chunk("01HCKZ8X10", "acme", "users", "u1", br#"{"name":"old"}"#, 1);
+    let new_chunk = make_chunk("01HCKZ8X11", "acme", "users", "u1", br#"{"name":"new"}"#, 2);
+    let old_key = chunk_s3_key("acme", "users", 0, "01HCKZ8X10");
+    let new_key = chunk_s3_key("acme", "users", 0, "01HCKZ8X11");
+    backend
+        .put_object(
+            &ObjectKey::new(&old_key),
+            old_chunk,
+            Some("zstd"),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    backend
+        .put_object(
+            &ObjectKey::new(&new_key),
+            new_chunk,
+            Some("zstd"),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let report = rebuild(&store, &backend).await.unwrap();
+    assert_eq!(report.versions_rebuilt, 2);
+    let chain = store.read_chain("_xtable/acme/users/u1").unwrap();
+    assert_eq!(
+        chain
+            .entries
+            .iter()
+            .map(|entry| entry.commit_version)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    let (entry, body) = store
+        .get_record_version_at_snapshot("acme", "users", "u1", 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.commit_version, 1);
+    assert_eq!(body, br#"{"name":"old"}"#);
+    assert_eq!(
+        store
+            .get_record_index("acme", "users", "u1")
+            .unwrap()
+            .unwrap()
+            .commit_version,
+        2
+    );
+}

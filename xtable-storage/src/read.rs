@@ -50,6 +50,7 @@ pub struct ReadResult {
 pub enum ReadSource {
     Active,
     Immutable,
+    RecordIndex,
     Chunk,
     NotFound,
 }
@@ -105,7 +106,40 @@ pub async fn read_at_snapshot(
         }
     }
 
-    // 3. Record index.
+    // 3. Historical record index. The legacy TBL_RECORD_INDEX row is
+    // latest-only and cannot answer an old snapshot; select the newest
+    // version <= snapshot before consulting the latest-row fallback.
+    if let Some((idx, body)) =
+        store.get_record_version_at_snapshot(space, table, record_id, snapshot)?
+    {
+        if idx.deleted {
+            return Ok(Some(tombstone_result(&idx)));
+        }
+        if !body.is_empty() {
+            // Once flush has installed a real chunk pointer, keep the normal
+            // chunk read path (and its integrity/bloom behavior). Before the
+            // first flush the placeholder pointer is absent, so the durable
+            // inline body is the correct source.
+            if store.get_chunk_index(&idx.chunk_id)?.is_none() {
+                return Ok(Some(ReadResult {
+                    body: bytes::Bytes::from(body),
+                    commit_version: idx.commit_version,
+                    txn_id: idx.txn_id,
+                    deleted: false,
+                    content_type: None,
+                    user_meta: vec![],
+                    schema_version: idx.schema_version,
+                    source: ReadSource::RecordIndex,
+                }));
+            }
+        }
+        // A rebuilt/legacy row may have no inline body. Its exact version
+        // still supplies the correct chunk pointer, so continue below.
+        return read_from_chunk(store, backend, space, table, record_id, snapshot, &idx).await;
+    }
+
+    // 4. Legacy latest-row fallback. New writes always populate the
+    // historical table, while this keeps pre-migration stores readable.
     let rec_idx = store.get_record_index(space, table, record_id)?;
     let Some(idx) = rec_idx else {
         return Ok(None);
@@ -114,26 +148,41 @@ pub async fn read_at_snapshot(
         return Ok(None);
     }
     if idx.deleted {
-        return Ok(Some(ReadResult {
-            body: bytes::Bytes::new(),
-            commit_version: idx.commit_version,
-            txn_id: idx.txn_id.clone(),
-            deleted: true,
-            content_type: None,
-            user_meta: vec![],
-            schema_version: idx.schema_version,
-            source: ReadSource::NotFound,
-        }));
+        return Ok(Some(tombstone_result(&idx)));
     }
+    read_from_chunk(store, backend, space, table, record_id, snapshot, &idx).await
+}
 
-    // 4. Chunk index lookup. RecordIndexEntry now carries the chunk_id
-    // directly; `lookup_chunk_for_record` reads it via `store.get_chunk_index`.
-    let chunk = lookup_chunk_for_record(store, &idx)?;
+fn tombstone_result(idx: &crate::txn_state::RecordIndexEntry) -> ReadResult {
+    ReadResult {
+        body: bytes::Bytes::new(),
+        commit_version: idx.commit_version,
+        txn_id: idx.txn_id.clone(),
+        deleted: true,
+        content_type: None,
+        user_meta: vec![],
+        schema_version: idx.schema_version,
+        source: ReadSource::NotFound,
+    }
+}
+
+async fn read_from_chunk(
+    store: &LocalStore,
+    backend: &Arc<xtable_backend::BackendClient>,
+    space: &str,
+    table: &str,
+    record_id: &str,
+    snapshot: u64,
+    idx: &crate::txn_state::RecordIndexEntry,
+) -> XtableResult<Option<ReadResult>> {
+    // 5. Chunk index lookup. The index pointer is version-specific after
+    // flush, so an older flush cannot redirect a newer snapshot here.
+    let chunk = lookup_chunk_for_record(store, idx)?;
     let Some(chunk) = chunk else {
         return Ok(None);
     };
 
-    // 5. Bloom check.
+    // 6. Bloom check.
     let key_bytes = crate::chunk::compose_key_bytes(space, table, record_id);
     if let Some(bloom) = &chunk.bloom {
         if !bloom_may_contain(bloom, &key_bytes) {
@@ -141,14 +190,16 @@ pub async fn read_at_snapshot(
         }
     }
 
-    // 6. S3 GET (full body; Range GET lands in PR #4+).
+    // 7. S3 GET (full body; Range GET lands in PR #4+).
     let file_bytes = backend
         .get_object(&ObjectKey::new(&chunk.s3_key))
         .await
         .map_err(|e| xtable_core::XtableError::Backend(format!("{}", e)))?
         .bytes;
 
-    // 7. Decompress + find our record.
+    // 8. Decompress and choose the newest matching entry visible at the
+    // requested snapshot. A chunk may contain more than one historical entry
+    // for the same record after rebuild/compaction.
     let body = decompress_body(&file_bytes)?;
     let entries = decode_body_entries(
         &body,
@@ -156,7 +207,13 @@ pub async fn read_at_snapshot(
     )?;
     let hit = entries
         .into_iter()
-        .find(|e| e.space == space && e.table == table && e.record_id == record_id);
+        .filter(|e| {
+            e.space == space
+                && e.table == table
+                && e.record_id == record_id
+                && e.commit_version <= snapshot
+        })
+        .max_by_key(|e| e.commit_version);
     let Some(e) = hit else {
         return Ok(None);
     };
@@ -168,7 +225,11 @@ pub async fn read_at_snapshot(
         content_type: e.content_type,
         user_meta: e.user_meta,
         schema_version: e.schema_version,
-        source: ReadSource::Chunk,
+        source: if e.deleted {
+            ReadSource::NotFound
+        } else {
+            ReadSource::Chunk
+        },
     }))
 }
 
@@ -202,6 +263,7 @@ mod tests {
     fn read_source_variants() {
         let _ = ReadSource::Active;
         let _ = ReadSource::Immutable;
+        let _ = ReadSource::RecordIndex;
         let _ = ReadSource::Chunk;
         let _ = ReadSource::NotFound;
     }

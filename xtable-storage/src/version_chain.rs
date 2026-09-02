@@ -118,25 +118,33 @@ impl VersionChain {
         self.entries.push(entry);
     }
 
-    /// Prune entries strictly below `min_snapshot` that are not the newest.
+    /// Prune entries that are older than the oldest active snapshot while
+    /// retaining the newest version visible to that snapshot.
     /// Returns the number of entries removed.
     ///
-    /// Invariant I8: never empty the chain (always keep at least the newest
-    /// entry). `min_snapshot = u64::MAX` means "no active readers" — drop
-    /// everything but the newest.
+    /// Invariant I8: never remove the version needed to answer the oldest
+    /// active snapshot. `min_snapshot = u64::MAX` means "no active readers"
+    /// — drop everything but the newest.
     pub fn prune_below(&mut self, min_snapshot: u64) -> usize {
         let n = self.entries.len();
         if n <= 1 {
             return 0;
         }
-        // Drop entries with commit_version < min_snapshot, but always leave
-        // at least the newest.
-        let count_below = self
-            .entries
-            .iter()
-            .take_while(|e| e.commit_version < min_snapshot)
-            .count();
-        let drop_count = count_below.min(n - 1);
+
+        // Keep the newest entry at or below the oldest active snapshot: it is
+        // the visibility anchor for that snapshot.  Entries older than that
+        // anchor can no longer be observed by any active reader.  When there
+        // are no active readers (`u64::MAX`), the newest entry is the only
+        // anchor we need to keep.
+        let keep_from = if min_snapshot == u64::MAX {
+            n - 1
+        } else {
+            self.entries
+                .iter()
+                .rposition(|e| e.commit_version <= min_snapshot)
+                .unwrap_or(0)
+        };
+        let drop_count = keep_from;
         if drop_count > 0 {
             self.entries.drain(0..drop_count);
         }
@@ -194,19 +202,23 @@ mod tests {
     }
 
     #[test]
-    fn prune_below_removes_old_but_keeps_newest() {
+    fn prune_below_keeps_snapshot_anchor() {
         let mut c = VersionChain::new("k".into());
         c.append(entry(1));
-        c.append(entry(2));
-        c.append(entry(3));
-        c.append(entry(4));
         c.append(entry(5));
-        // Prune below 3 — should keep [3, 4, 5]
-        let removed = c.prune_below(3);
-        assert_eq!(removed, 2);
-        assert_eq!(c.entries.len(), 3);
-        assert_eq!(c.entries[0].commit_version, 3);
-        assert_eq!(c.entries[2].commit_version, 5);
+        c.append(entry(10));
+        // Prune at snapshot 7 — v5 is the version visible to that snapshot
+        // and must remain as the anchor.
+        let removed = c.prune_below(7);
+        assert_eq!(removed, 1);
+        assert_eq!(
+            c.entries
+                .iter()
+                .map(|e| e.commit_version)
+                .collect::<Vec<_>>(),
+            vec![5, 10]
+        );
+        assert_eq!(c.read_at_snapshot(7).map(|e| e.commit_version), Some(5));
     }
 
     #[test]

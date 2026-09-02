@@ -45,16 +45,23 @@ impl Default for ServerConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AuthConfig {
-    pub edge_access_key_id: String,
-    pub edge_secret_access_key: String,
+    /// HMAC secret used to verify Bearer JWTs sent to the HTTP API.
+    pub jwt_secret: String,
+    /// Optional JWT issuer claim. When set, \`iss\` must match exactly.
+    #[serde(default)]
+    pub jwt_issuer: Option<String>,
+    /// Optional JWT audience claim. When set, \`aud\` must contain this value.
+    #[serde(default)]
+    pub jwt_audience: Option<String>,
     pub allow_anonymous_read: bool,
 }
 
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
-            edge_access_key_id: "xtableadmin".to_string(),
-            edge_secret_access_key: "changeme".to_string(),
+            jwt_secret: "changeme".to_string(),
+            jwt_issuer: None,
+            jwt_audience: None,
             allow_anonymous_read: false,
         }
     }

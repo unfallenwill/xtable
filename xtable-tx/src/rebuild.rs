@@ -158,7 +158,15 @@ pub async fn rebuild(
         size: u64,
         etag: String,
     }
+    struct HistoricalRecord {
+        key: (String, String, String),
+        entry: ChunkEntry,
+        chunk_s3_key: String,
+        chunk_id: String,
+        etag: String,
+    }
     let mut per_key: HashMap<(String, String, String), PerKey> = HashMap::new();
+    let mut historical: Vec<HistoricalRecord> = Vec::new();
     let mut max_v: u64 = 0;
 
     for lo in objects {
@@ -237,6 +245,13 @@ pub async fn rebuild(
             max_v = max_v.max(e.commit_version);
             let key = (e.space.clone(), e.table.clone(), e.record_id.clone());
             let size = e.value.len() as u64;
+            historical.push(HistoricalRecord {
+                key: key.clone(),
+                entry: e.clone(),
+                chunk_s3_key: lo.key.clone(),
+                chunk_id: header.chunk_id.clone(),
+                etag: lo.etag.clone(),
+            });
             per_key
                 .entry(key)
                 .and_modify(|cur| {
@@ -260,24 +275,42 @@ pub async fn rebuild(
         }
     }
 
-    // Build per-record bulk updates.
+    // Build latest-row updates and preserve every historical record version.
     let mut version_updates: Vec<(ObjectKey, VersionRecord)> = Vec::with_capacity(per_key.len());
     let mut record_updates: Vec<((String, String, String), RecordIndexEntry)> =
         Vec::with_capacity(per_key.len());
-    let mut chain_entries: Vec<(String, VersionEntry, u64)> = Vec::with_capacity(per_key.len());
+    let mut chain_entries: Vec<(String, VersionEntry, u64)> = Vec::with_capacity(historical.len());
+    let mut historical_updates: Vec<((String, String, String), RecordIndexEntry, Vec<u8>)> =
+        Vec::with_capacity(historical.len());
+
+    historical.sort_by(|a, b| {
+        a.key
+            .cmp(&b.key)
+            .then(a.entry.commit_version.cmp(&b.entry.commit_version))
+    });
+    for h in &historical {
+        let index_entry = record_index_from_entry(&h.entry, &h.chunk_id);
+        historical_updates.push((h.key.clone(), index_entry, h.entry.value.clone()));
+        chain_entries.push((
+            record_key(&h.key.0, &h.key.1, &h.key.2),
+            version_entry_from_entry(
+                &h.entry,
+                &h.chunk_s3_key,
+                &h.etag,
+                h.entry.value.len() as u64,
+            ),
+            u64::MAX, // cold rebuild: never conflicts with prior state
+        ));
+    }
+
     for ((space, table, record_id), k) in per_key {
         let rkey = record_key(&space, &table, &record_id);
         let vrec = version_record_from_entry(&k.entry, &k.chunk_s3_key, &k.etag, k.size);
         version_updates.push((ObjectKey::new(&rkey), vrec));
         let rid = record_index_from_entry(&k.entry, &k.chunk_id);
         record_updates.push(((space, table, record_id), rid));
-        chain_entries.push((
-            rkey,
-            version_entry_from_entry(&k.entry, &k.chunk_s3_key, &k.etag, k.size),
-            u64::MAX, // cold rebuild: never conflicts with prior state
-        ));
-        report.versions_rebuilt += 1;
     }
+    report.versions_rebuilt = historical_updates.len();
 
     // Persist: chunk index, then record index, then versions / chain.
     // Each goes in its own redb txn so a failure in one doesn't poison
@@ -290,6 +323,9 @@ pub async fn rebuild(
     }
     if !version_updates.is_empty() {
         store.put_versions_bulk(&version_updates)?;
+    }
+    if !historical_updates.is_empty() {
+        store.put_record_versions_bulk(&historical_updates)?;
     }
     if !chain_entries.is_empty() {
         store.append_chain_entries_bulk(&chain_entries)?;

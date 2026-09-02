@@ -1,7 +1,6 @@
 //! xtable server binary entry point.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::Context;
 use axum::middleware;
@@ -9,7 +8,6 @@ use axum::response::IntoResponse;
 use clap::Parser;
 use tracing::{info, warn};
 
-use xtable_auth::StaticCredential;
 use xtable_backend::BackendClient;
 use xtable_core::config::Config;
 use xtable_server::shutdown::wait_for_shutdown;
@@ -91,16 +89,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Credential store
-    let creds = Arc::new(xtable_auth::CredentialStore::new());
-    creds.put(
-        StaticCredential {
-            access_key_id: config.auth.edge_access_key_id.clone(),
-            secret_access_key: config.auth.edge_secret_access_key.clone(),
-        }
-        .into_entry(),
-    );
-
     // Bind metric handles AFTER telemetry init. `Metrics::default()` would
     // bind to the OTel no-op provider and silently drop every recording
     // for the lifetime of the process; `Metrics::new(&global::meter("xtable"))`
@@ -108,8 +96,7 @@ async fn main() -> anyhow::Result<()> {
     let metrics =
         xtable_telemetry::metrics::Metrics::new(&xtable_telemetry::global::meter("xtable"));
 
-    let state =
-        xtable_server::app::AppState::new(config.clone(), store, backend.clone(), creds, metrics);
+    let state = xtable_server::app::AppState::new(config.clone(), store, backend.clone(), metrics);
 
     // Spawn GC task.
     spawn_gc(state.clone());
@@ -177,7 +164,7 @@ fn build_router(state: xtable_server::app::AppState) -> axum::Router {
     use xtable_telemetry::extract_route::extract_matched_path;
     use xtable_telemetry::http_semconv::{SemConvMakeSpan, SemConvOnFailure, SemConvOnResponse};
 
-    // SigV4 authentication middleware. The structured-data-space routes under
+    // JWT authentication middleware. The structured-data-space routes under
     // /v1 require authentication; /healthz and /readyz are public.
     let auth_layer = axum::middleware::from_fn_with_state(state.clone(), auth_middleware);
 
@@ -189,9 +176,11 @@ fn build_router(state: xtable_server::app::AppState) -> axum::Router {
     let state_arc = std::sync::Arc::new(state.clone());
     let structured_routes = xtable_server::structured::router().with_state(state_arc);
 
+    let protected_routes = structured_routes.layer(auth_layer);
+
     axum::Router::new()
         .merge(admin)
-        .merge(structured_routes)
+        .merge(protected_routes)
         // Axum middleware is LIFO: the LAST `.layer()` call is the OUTERMOST
         // wrapper, so a request traverses layers top-down (outer → inner) and
         // responses bubble bottom-up. TraceLayer must be outermost so every
@@ -201,7 +190,6 @@ fn build_router(state: xtable_server::app::AppState) -> axum::Router {
         // bubble up through TraceLayer and red_metrics_middleware on the way
         // out (per spec §9.1 "every request including auth-rejected 401
         // produces a span").
-        .layer(auth_layer)
         .layer(middleware::from_fn(extract_matched_path))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -216,7 +204,7 @@ fn build_router(state: xtable_server::app::AppState) -> axum::Router {
         .with_state(state)
 }
 
-/// SigV4 auth middleware. Rejects unauthenticated requests with 401 before
+/// JWT auth middleware. Rejects unauthenticated requests with 401 before
 /// they reach the structured-data-space handlers.
 async fn auth_middleware(
     axum::extract::State(state): axum::extract::State<xtable_server::app::AppState>,

@@ -46,14 +46,26 @@ pub fn sweep_stale_txns(store: &LocalStore, timeout_secs: i64) -> Result<usize, 
 
     let mut aborted = 0;
     for txn_id in stale {
-        abort_txn_local(store, &txn_id)?;
-        aborted += 1;
+        if abort_txn_local(store, &txn_id)? {
+            aborted += 1;
+        }
     }
     Ok(aborted)
 }
 
-fn abort_txn_local(store: &LocalStore, txn_id: &str) -> Result<(), XtableError> {
+fn abort_txn_local(store: &LocalStore, txn_id: &str) -> Result<bool, XtableError> {
     use xtable_storage::WalRecord;
+    let Some(state) = store.get_txn_state(txn_id)? else {
+        return Ok(false);
+    };
+    // Claim the Active state before touching the write set. A commit or a
+    // second stale-txn sweeper that wins this CAS owns the transaction now;
+    // GC must never clean its writes or overwrite its terminal state.
+    if state.status != TxnStatus::Active
+        || !store.compare_and_set_txn_status(txn_id, TxnStatus::Active, TxnStatus::Aborted)?
+    {
+        return Ok(false);
+    }
     let writes = store.iter_write_set(txn_id)?;
     for (_k, entry) in writes {
         if let Some(handle) = &entry.body_handle {
@@ -69,22 +81,17 @@ fn abort_txn_local(store: &LocalStore, txn_id: &str) -> Result<(), XtableError> 
         reason: "GC: stale txn timeout".into(),
     })?;
     // V13 fix: release the snapshot pin so GC sweeping doesn't leak pins.
-    if let Ok(Some(s)) = store.get_txn_state(txn_id) {
-        let _ = store.unregister_snapshot(s.snapshot_version);
-    }
-    if let Some(mut r) = store.get_txn_state(txn_id)? {
-        r.status = TxnStatus::Aborted;
-        let _ = store.put_txn_state(txn_id, &r);
-    }
-    Ok(())
+    let _ = store.unregister_snapshot(state.snapshot_version);
+    Ok(true)
 }
 
 /// Run MVCC chain GC. Returns (chains_visited, entries_removed).
 /// Implements invariant I8.
 pub fn gc_version_chains(store: &LocalStore) -> Result<(usize, usize), XtableError> {
-    let min_snapshot = store.min_active_snapshot()?;
-    let (visited, removed) = store.gc_chains(min_snapshot)?;
-    Ok((visited, removed))
+    // The active-snapshot lookup and chain rewrite must share one redb write
+    // transaction. Reading the minimum first leaves a window in which a new
+    // reader can register and still lose its visibility anchor.
+    store.gc_chains_at_active_snapshot()
 }
 
 /// Run a single combined sweep: stale txns + chain GC.

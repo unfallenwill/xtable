@@ -12,7 +12,6 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-use xtable_auth::{CredentialStore, StaticCredential};
 use xtable_backend::BackendClient;
 use xtable_core::config::Config;
 use xtable_server::app::AppState;
@@ -29,19 +28,11 @@ async fn build_app() -> (Router, TempDir) {
 
     let store = LocalStore::open(&cfg.storage.redb_dir).unwrap();
     let backend = BackendClient::dummy_for_test_async().await.unwrap();
-    let creds = Arc::new(CredentialStore::new());
-    creds.put(
-        StaticCredential {
-            access_key_id: "test".into(),
-            secret_access_key: "test".into(),
-        }
-        .into_entry(),
-    );
+    cfg.auth.jwt_secret = "test".into();
     let state = AppState::new(
         cfg,
         store,
         backend,
-        creds,
         xtable_telemetry::metrics::Metrics::default(),
     );
     let app = xtable_server::structured::router().with_state(Arc::new(state));

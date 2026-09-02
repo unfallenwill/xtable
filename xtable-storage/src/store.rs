@@ -12,6 +12,7 @@
 //! - staged_blobs (body spill metadata)
 //! - multipart (Phase 3 in-flight uploads)
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
@@ -19,14 +20,14 @@ use redb::{Database, ReadableTable};
 
 use crate::cf::{
     meta_key, ChunkStatus, TBL_ACTIVE_SNAPSHOTS, TBL_CHUNK_INDEX, TBL_META, TBL_MULTIPART,
-    TBL_RECORD_INDEX, TBL_SCHEMA_INDEX, TBL_SI_EDGES, TBL_SI_IN_EDGES_BY_TJ, TBL_SI_READ,
-    TBL_SI_RECENT, TBL_SI_WRITE, TBL_STAGED_BLOBS, TBL_TXN_STATE, TBL_VERSIONS, TBL_VERSION_CHAINS,
-    TBL_WAL, TBL_WRITE_SET,
+    TBL_RECORD_INDEX, TBL_RECORD_VERSIONS, TBL_SCHEMA_INDEX, TBL_SI_EDGES, TBL_SI_IN_EDGES_BY_TJ,
+    TBL_SI_READ, TBL_SI_RECENT, TBL_SI_WRITE, TBL_STAGED_BLOBS, TBL_TXN_STATE, TBL_VERSIONS,
+    TBL_VERSION_CHAINS, TBL_WAL, TBL_WRITE_SET,
 };
 use crate::chunk::ChunkIndexEntry;
 use crate::txn_state::{
-    BlobRecord, MultipartState, RecordIndexEntry, SchemaIndexEntry, StoredRecord, TxnStateRecord,
-    WriteSetEntry,
+    BlobRecord, MultipartState, RecordIndexEntry, SchemaIndexEntry, StoredRecord,
+    StoredRecordVersion, TxnStateRecord, WriteSetEntry,
 };
 use crate::version_chain::{VersionChain, VersionEntry};
 use crate::version_index::VersionRecord;
@@ -89,6 +90,7 @@ impl LocalStore {
                 let _ = txn.open_table(TBL_VERSION_CHAINS).map_err(redb_err)?;
                 let _ = txn.open_table(TBL_ACTIVE_SNAPSHOTS).map_err(redb_err)?;
                 let _ = txn.open_table(TBL_RECORD_INDEX).map_err(redb_err)?;
+                let _ = txn.open_table(TBL_RECORD_VERSIONS).map_err(redb_err)?;
                 let _ = txn.open_table(TBL_SCHEMA_INDEX).map_err(redb_err)?;
                 let _ = txn.open_table(TBL_CHUNK_INDEX).map_err(redb_err)?;
                 let _ = txn.open_table(TBL_SI_READ).map_err(redb_err)?;
@@ -319,6 +321,33 @@ impl LocalStore {
         })
     }
 
+    /// Atomically transition a transaction state if it still has
+    /// `expected_status`.  The coordinator uses this as the durable guard
+    /// around the commit/abort state machine; an in-process mutex alone is
+    /// insufficient when more than one coordinator instance shares a store.
+    pub fn compare_and_set_txn_status(
+        &self,
+        txn_id: &str,
+        expected_status: TxnStatus,
+        next_status: TxnStatus,
+    ) -> XtableResult<bool> {
+        self.with_write(|txn| {
+            let mut tbl = txn.open_table(TBL_TXN_STATE).map_err(redb_err)?;
+            let raw = match tbl.get(txn_id).map_err(redb_err)? {
+                Some(value) => value.value().to_vec(),
+                None => return Ok(false),
+            };
+            let mut rec: TxnStateRecord = bincode::deserialize(&raw).map_err(XtableError::from)?;
+            if rec.status != expected_status {
+                return Ok(false);
+            }
+            rec.status = next_status;
+            let bytes = bincode::serialize(&rec).map_err(XtableError::from)?;
+            tbl.insert(txn_id, bytes.as_slice()).map_err(redb_err)?;
+            Ok(true)
+        })
+    }
+
     // ----- write_set (Phase 2 / MVCC) -----
 
     pub fn put_write_entry(
@@ -503,21 +532,26 @@ impl LocalStore {
         Ok(chain.entries.last().cloned())
     }
 
-    /// Append a new entry to a key's chain. Used by CommitTxn (atomic with
-    /// all other writes for the same txn in a single redb write txn).
+    /// Append a new entry to a key's chain. The read, monotonicity check and
+    /// write all happen inside one redb write transaction; otherwise two
+    /// concurrent read-modify-write callers could overwrite one another.
     pub fn append_chain_entry(&self, key: &str, entry: &VersionEntry) -> XtableResult<()> {
-        let mut chain = self.read_chain(key)?;
-        let latest = chain.latest_commit_version();
-        if entry.commit_version <= latest && !chain.entries.is_empty() {
-            return Err(XtableError::internal(format!(
-                "chain append not monotonic: latest={} new={}",
-                latest, entry.commit_version
-            )));
-        }
-        chain.append(entry.clone());
-        let bytes = bincode::serialize(&chain).map_err(XtableError::from)?;
         self.with_write(|txn| {
             let mut tbl = txn.open_table(TBL_VERSION_CHAINS).map_err(redb_err)?;
+            let mut chain = match tbl.get(key).map_err(redb_err)? {
+                Some(value) => bincode::deserialize::<VersionChain>(value.value())
+                    .map_err(XtableError::from)?,
+                None => VersionChain::new(key.to_string()),
+            };
+            let latest = chain.latest_commit_version();
+            if entry.commit_version <= latest && !chain.entries.is_empty() {
+                return Err(XtableError::internal(format!(
+                    "chain append not monotonic: latest={} new={}",
+                    latest, entry.commit_version
+                )));
+            }
+            chain.append(entry.clone());
+            let bytes = bincode::serialize(&chain).map_err(XtableError::from)?;
             tbl.insert(key, bytes.as_slice()).map_err(redb_err)?;
             Ok(())
         })
@@ -542,38 +576,56 @@ impl LocalStore {
             return Ok(());
         }
         let mut sorted = entries.to_vec();
-        sorted.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut prepared: Vec<(String, Vec<u8>)> = Vec::with_capacity(sorted.len());
-        for (key, entry, snapshot_version) in &sorted {
-            let mut chain = self.read_chain(key)?;
-            let latest = chain.latest_commit_version();
-            // PR-Fix9.1: snapshot conflict check. If the chain already
-            // has an entry past our snapshot, a concurrent txn wrote
-            // after our snapshot — we must NOT overwrite (lost-update).
-            // Rolling back via redb aborts the entire bulk append so
-            // partial state is never published.
-            if !chain.entries.is_empty() && latest > *snapshot_version {
-                return Err(XtableError::Conflict(format!(
-                    "{}: snapshot {} < chain latest {}",
-                    key, snapshot_version, latest
-                )));
-            }
-            // Monotonicity check (kept for defense-in-depth).
-            if entry.commit_version <= latest && !chain.entries.is_empty() {
-                return Err(XtableError::internal(format!(
-                    "chain append not monotonic for key {}: latest={} new={}",
-                    key, latest, entry.commit_version
-                )));
-            }
-            chain.append(entry.clone());
-            let bytes = bincode::serialize(&chain).map_err(XtableError::from)?;
-            prepared.push((key.clone(), bytes));
-        }
+        sorted.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then(a.1.commit_version.cmp(&b.1.commit_version))
+        });
         self.with_write(|txn| {
             let mut tbl = txn.open_table(TBL_VERSION_CHAINS).map_err(redb_err)?;
-            for (k, bytes) in &prepared {
-                tbl.insert(k.as_str(), bytes.as_slice()).map_err(redb_err)?;
+            for (key, entry, snapshot_version) in &sorted {
+                // Read the current value from the same write transaction that
+                // will publish the new value. The previous implementation
+                // prepared chains using independent read transactions and
+                // could therefore overwrite a concurrent append.
+                let mut chain = match tbl.get(key.as_str()).map_err(redb_err)? {
+                    Some(value) => bincode::deserialize::<VersionChain>(value.value())
+                        .map_err(XtableError::from)?,
+                    None => VersionChain::new(key.clone()),
+                };
+                let latest = chain.latest_commit_version();
+                if !chain.entries.is_empty() && latest > *snapshot_version {
+                    return Err(XtableError::Conflict(format!(
+                        "{}: snapshot {} < chain latest {}",
+                        key, snapshot_version, latest
+                    )));
+                }
+                if entry.commit_version == latest
+                    && chain.entries.last().is_some_and(|current| {
+                        current.txn_id == entry.txn_id
+                            && current.backend_key == entry.backend_key
+                            && current.deleted == entry.deleted
+                    })
+                {
+                    // A duplicate row in one rebuild/commit batch is already
+                    // represented by the value just inserted. Treat it as
+                    // idempotent rather than manufacturing a duplicate
+                    // version in the chain.
+                    continue;
+                }
+                if entry.commit_version <= latest && !chain.entries.is_empty() {
+                    return Err(XtableError::internal(format!(
+                        "chain append not monotonic for key {}: latest={} new={}",
+                        key, latest, entry.commit_version
+                    )));
+                }
+                chain.append(entry.clone());
+                let bytes = bincode::serialize(&chain).map_err(XtableError::from)?;
+                tbl.insert(key.as_str(), bytes.as_slice())
+                    .map_err(redb_err)?;
             }
+            // Every insert above is part of this one redb transaction. An
+            // error from any key aborts the transaction, so a multi-key
+            // append remains all-or-nothing.
             Ok(())
         })
     }
@@ -587,30 +639,118 @@ impl LocalStore {
     /// means "we looked at the chain", not "we modified it".
     /// Implements invariant I8.
     pub fn gc_chains(&self, min_snapshot: u64) -> XtableResult<(usize, usize)> {
-        let chains = self.iter_all_chains()?;
-        let mut visited = 0usize;
-        let mut total_removed = 0usize;
-        let mut to_write: Vec<(String, Vec<u8>)> = Vec::new();
-        for (key, mut chain) in chains {
-            visited += 1;
-            let removed = chain.prune_below(min_snapshot);
-            if removed > 0 {
-                total_removed += removed;
-                debug_assert!(!chain.entries.is_empty(), "GC left empty chain for {}", key);
-                let bytes = bincode::serialize(&chain).map_err(XtableError::from)?;
-                to_write.push((key, bytes));
-            }
-        }
-        if !to_write.is_empty() {
-            self.with_write(|txn| {
-                let mut tbl = txn.open_table(TBL_VERSION_CHAINS).map_err(redb_err)?;
-                for (k, bytes) in &to_write {
-                    tbl.insert(k.as_str(), bytes.as_slice()).map_err(redb_err)?;
+        self.gc_chains_inner(Some(min_snapshot))
+    }
+
+    /// Run chain GC using the active-snapshot table read in the same write
+    /// transaction as the prune. This closes the race where a reader pins a
+    /// snapshot after a separate `min_active_snapshot()` read but before GC
+    /// writes its stale copy back.
+    pub fn gc_chains_at_active_snapshot(&self) -> XtableResult<(usize, usize)> {
+        self.gc_chains_inner(None)
+    }
+
+    fn gc_chains_inner(&self, requested_min: Option<u64>) -> XtableResult<(usize, usize)> {
+        self.with_write(|txn| {
+            let active_min = {
+                let snapshots = txn.open_table(TBL_ACTIVE_SNAPSHOTS).map_err(redb_err)?;
+                let mut min = u64::MAX;
+                for item in snapshots.iter().map_err(redb_err)? {
+                    let (key, _) = item.map_err(redb_err)?;
+                    min = min.min(key.value());
                 }
-                Ok(())
-            })?;
-        }
-        Ok((visited, total_removed))
+                min
+            };
+            // Even callers supplying an explicit threshold must not be able
+            // to prune past a snapshot that is currently registered.
+            let min_snapshot = requested_min
+                .map(|requested| requested.min(active_min))
+                .unwrap_or(active_min);
+
+            let mut chains = Vec::new();
+            {
+                let table = txn.open_table(TBL_VERSION_CHAINS).map_err(redb_err)?;
+                for item in table.iter().map_err(redb_err)? {
+                    let (key, value) = item.map_err(redb_err)?;
+                    let chain: VersionChain =
+                        bincode::deserialize(value.value()).map_err(XtableError::from)?;
+                    chains.push((key.value().to_string(), chain));
+                }
+            }
+
+            let mut visited = 0usize;
+            let mut total_removed = 0usize;
+            let mut updates = Vec::new();
+            for (key, mut chain) in chains {
+                visited += 1;
+                let removed = chain.prune_below(min_snapshot);
+                if removed > 0 {
+                    total_removed += removed;
+                    debug_assert!(!chain.entries.is_empty(), "GC left empty chain for {}", key);
+                    updates.push((key, bincode::serialize(&chain).map_err(XtableError::from)?));
+                }
+            }
+            if !updates.is_empty() {
+                let mut table = txn.open_table(TBL_VERSION_CHAINS).map_err(redb_err)?;
+                for (key, bytes) in updates {
+                    table
+                        .insert(key.as_str(), bytes.as_slice())
+                        .map_err(redb_err)?;
+                }
+            }
+
+            // The structured historical index stores the bodies needed by
+            // snapshot reads, so it must follow the same retention rule as
+            // the chain. Keep the newest version visible at the safe
+            // threshold for each record and remove only older rows.
+            let mut grouped_versions: BTreeMap<(String, String, String), Vec<u64>> =
+                BTreeMap::new();
+            {
+                let versions = txn.open_table(TBL_RECORD_VERSIONS).map_err(redb_err)?;
+                for item in versions.iter().map_err(redb_err)? {
+                    let (key, _value) = item.map_err(redb_err)?;
+                    let (space, table, record_id, commit_version) = key.value();
+                    grouped_versions
+                        .entry((space.to_string(), table.to_string(), record_id.to_string()))
+                        .or_default()
+                        .push(commit_version);
+                }
+            }
+            let mut history_to_remove = Vec::new();
+            for ((space, table, record_id), mut versions) in grouped_versions {
+                versions.sort_unstable();
+                let keep_from = if min_snapshot == u64::MAX {
+                    versions.len().saturating_sub(1)
+                } else {
+                    versions
+                        .iter()
+                        .rposition(|version| *version <= min_snapshot)
+                        .unwrap_or(0)
+                };
+                for commit_version in versions.into_iter().take(keep_from) {
+                    history_to_remove.push((
+                        space.clone(),
+                        table.clone(),
+                        record_id.clone(),
+                        commit_version,
+                    ));
+                }
+            }
+            if !history_to_remove.is_empty() {
+                let mut versions = txn.open_table(TBL_RECORD_VERSIONS).map_err(redb_err)?;
+                for (space, table, record_id, commit_version) in history_to_remove {
+                    versions
+                        .remove((
+                            space.as_str(),
+                            table.as_str(),
+                            record_id.as_str(),
+                            commit_version,
+                        ))
+                        .map_err(redb_err)?;
+                }
+            }
+            Ok((visited, total_removed))
+        })
     }
 
     /// Iterate all chains (used by GC and admin).
@@ -629,6 +769,32 @@ impl LocalStore {
     }
 
     // ===== Active snapshot registry =====
+
+    /// Capture the current global version and register its pin in the same
+    /// redb write transaction. GC uses the same transaction boundary, so a
+    /// reader is either visible to GC before pruning or starts after the
+    /// prune and receives the post-GC version.
+    pub fn capture_and_register_snapshot(&self) -> XtableResult<u64> {
+        self.with_write(|txn| {
+            let snapshot = {
+                let meta = txn.open_table(TBL_META).map_err(redb_err)?;
+                let current = meta
+                    .get(meta_key::GLOBAL_VERSION)
+                    .map_err(redb_err)?
+                    .map(|v| v.value())
+                    .unwrap_or(0);
+                current
+            };
+            let mut snapshots = txn.open_table(TBL_ACTIVE_SNAPSHOTS).map_err(redb_err)?;
+            let cur = snapshots
+                .get(snapshot)
+                .map_err(redb_err)?
+                .map(|v| v.value())
+                .unwrap_or(0);
+            snapshots.insert(snapshot, cur + 1).map_err(redb_err)?;
+            Ok(snapshot)
+        })
+    }
 
     /// Register a snapshot_version as held by an active transaction.
     /// V9 fix: ref-count. Multiple txns at the same snapshot increment the count;
@@ -752,11 +918,153 @@ impl LocalStore {
             body_json,
         })
         .map_err(XtableError::from)?;
+        let version_bytes = bincode::serialize(&StoredRecordVersion {
+            entry: entry.clone(),
+            body: serde_json::to_vec(body).map_err(XtableError::from)?,
+        })
+        .map_err(XtableError::from)?;
         self.with_write(|txn| {
-            let mut tbl = txn.open_table(TBL_RECORD_INDEX).map_err(redb_err)?;
-            tbl.insert((space, table, record_id), bytes.as_slice())
+            let replace_latest = {
+                let latest = txn.open_table(TBL_RECORD_INDEX).map_err(redb_err)?;
+                let raw = latest
+                    .get((space, table, record_id))
+                    .map_err(redb_err)?
+                    .map(|value| value.value().to_vec());
+                match raw {
+                    None => true,
+                    Some(raw) => {
+                        let current_version = bincode::deserialize::<StoredRecord>(&raw)
+                            .map(|stored| stored.entry.commit_version)
+                            .or_else(|_| {
+                                bincode::deserialize::<RecordIndexEntry>(&raw)
+                                    .map(|entry| entry.commit_version)
+                            })
+                            .map_err(|_| {
+                                XtableError::Storage("record index: decode failed".into())
+                            })?;
+                        entry.commit_version >= current_version
+                    }
+                }
+            };
+            if replace_latest {
+                let mut tbl = txn.open_table(TBL_RECORD_INDEX).map_err(redb_err)?;
+                tbl.insert((space, table, record_id), bytes.as_slice())
+                    .map_err(redb_err)?;
+            }
+            let mut versions = txn.open_table(TBL_RECORD_VERSIONS).map_err(redb_err)?;
+            versions
+                .insert(
+                    (space, table, record_id, entry.commit_version),
+                    version_bytes.as_slice(),
+                )
                 .map_err(redb_err)?;
             Ok(())
+        })
+    }
+
+    /// Persist one historical structured-record version.  The latest-row
+    /// index is intentionally not changed by this method; rebuild uses it to
+    /// restore all versions before separately restoring the latest pointer.
+    pub fn put_record_version(
+        &self,
+        space: &str,
+        table: &str,
+        record_id: &str,
+        entry: &RecordIndexEntry,
+        body: &[u8],
+    ) -> XtableResult<()> {
+        let bytes = bincode::serialize(&StoredRecordVersion {
+            entry: entry.clone(),
+            body: body.to_vec(),
+        })
+        .map_err(XtableError::from)?;
+        self.with_write(|txn| {
+            let mut versions = txn.open_table(TBL_RECORD_VERSIONS).map_err(redb_err)?;
+            versions
+                .insert(
+                    (space, table, record_id, entry.commit_version),
+                    bytes.as_slice(),
+                )
+                .map_err(redb_err)?;
+            Ok(())
+        })
+    }
+
+    /// Persist multiple historical versions in one redb transaction.
+    pub fn put_record_versions_bulk(
+        &self,
+        updates: &[((String, String, String), RecordIndexEntry, Vec<u8>)],
+    ) -> XtableResult<()> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let mut prepared = Vec::with_capacity(updates.len());
+        for ((space, table, record_id), entry, body) in updates {
+            let bytes = bincode::serialize(&StoredRecordVersion {
+                entry: entry.clone(),
+                body: body.clone(),
+            })
+            .map_err(XtableError::from)?;
+            prepared.push((
+                (
+                    space.clone(),
+                    table.clone(),
+                    record_id.clone(),
+                    entry.commit_version,
+                ),
+                bytes,
+            ));
+        }
+        self.with_write(|txn| {
+            let mut versions = txn.open_table(TBL_RECORD_VERSIONS).map_err(redb_err)?;
+            for ((space, table, record_id, commit_version), bytes) in &prepared {
+                versions
+                    .insert(
+                        (
+                            space.as_str(),
+                            table.as_str(),
+                            record_id.as_str(),
+                            *commit_version,
+                        ),
+                        bytes.as_slice(),
+                    )
+                    .map_err(redb_err)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Return the newest structured-record version visible at `snapshot`.
+    /// The table is intentionally scanned here rather than relying on a
+    /// fragile key-range encoding; the latest-row index still provides the
+    /// record-id enumeration for queries.
+    pub fn get_record_version_at_snapshot(
+        &self,
+        space: &str,
+        table: &str,
+        record_id: &str,
+        snapshot: u64,
+    ) -> XtableResult<Option<(RecordIndexEntry, Vec<u8>)>> {
+        self.with_read(|txn| {
+            let versions = txn.open_table(TBL_RECORD_VERSIONS).map_err(redb_err)?;
+            let mut best: Option<(RecordIndexEntry, Vec<u8>)> = None;
+            for item in versions.iter().map_err(redb_err)? {
+                let (key, value) = item.map_err(redb_err)?;
+                let (s, t, rid, commit_version) = key.value();
+                if s != space || t != table || rid != record_id || commit_version > snapshot {
+                    continue;
+                }
+                let stored: StoredRecordVersion =
+                    bincode::deserialize(value.value()).map_err(XtableError::from)?;
+                if best
+                    .as_ref()
+                    .map(|(entry, _)| entry.commit_version < stored.entry.commit_version)
+                    .unwrap_or(true)
+                {
+                    best = Some((stored.entry, stored.body));
+                }
+            }
+            Ok(best)
         })
     }
 
@@ -839,6 +1147,71 @@ impl LocalStore {
                 return Ok(true);
             }
             Err(XtableError::Storage("record index: decode failed".into()))
+        })
+    }
+
+    /// Update the chunk pointer for one exact record version.  The latest-row
+    /// pointer is changed only when it still refers to the same commit
+    /// version; flushing an older immutable must never move the current
+    /// pointer backwards.
+    pub fn update_record_index_chunk_id_for_version(
+        &self,
+        space: &str,
+        table: &str,
+        record_id: &str,
+        commit_version: u64,
+        new_chunk_id: &str,
+    ) -> XtableResult<bool> {
+        self.with_write(|txn| {
+            let mut changed = false;
+            {
+                let mut latest = txn.open_table(TBL_RECORD_INDEX).map_err(redb_err)?;
+                let raw = latest
+                    .get((space, table, record_id))
+                    .map_err(redb_err)?
+                    .map(|value| value.value().to_vec());
+                if let Some(raw) = raw {
+                    if let Ok(mut stored) = bincode::deserialize::<StoredRecord>(&raw) {
+                        if stored.entry.commit_version == commit_version {
+                            stored.entry.chunk_id = new_chunk_id.to_string();
+                            let bytes = bincode::serialize(&stored).map_err(XtableError::from)?;
+                            latest
+                                .insert((space, table, record_id), bytes.as_slice())
+                                .map_err(redb_err)?;
+                            changed = true;
+                        }
+                    } else if let Ok(mut entry) = bincode::deserialize::<RecordIndexEntry>(&raw) {
+                        if entry.commit_version == commit_version {
+                            entry.chunk_id = new_chunk_id.to_string();
+                            let bytes = bincode::serialize(&entry).map_err(XtableError::from)?;
+                            latest
+                                .insert((space, table, record_id), bytes.as_slice())
+                                .map_err(redb_err)?;
+                            changed = true;
+                        }
+                    } else {
+                        return Err(XtableError::Storage("record index: decode failed".into()));
+                    }
+                }
+            }
+            {
+                let mut versions = txn.open_table(TBL_RECORD_VERSIONS).map_err(redb_err)?;
+                let raw = versions
+                    .get((space, table, record_id, commit_version))
+                    .map_err(redb_err)?
+                    .map(|value| value.value().to_vec());
+                if let Some(raw) = raw {
+                    let mut stored: StoredRecordVersion =
+                        bincode::deserialize(&raw).map_err(XtableError::from)?;
+                    stored.entry.chunk_id = new_chunk_id.to_string();
+                    let bytes = bincode::serialize(&stored).map_err(XtableError::from)?;
+                    versions
+                        .insert((space, table, record_id, commit_version), bytes.as_slice())
+                        .map_err(redb_err)?;
+                    changed = true;
+                }
+            }
+            Ok(changed)
         })
     }
 
@@ -1193,5 +1566,152 @@ mod tests {
         assert_eq!(iter.len(), 1);
         assert_eq!(iter[0].0, "r");
         assert_eq!(iter[0].1.commit_version, 42);
+    }
+
+    #[test]
+    fn historical_record_versions_select_snapshot() {
+        let tmp = TempDir::new().unwrap();
+        let store = LocalStore::open_path(&tmp.path().join("xt.redb")).unwrap();
+        let mut v1 = RecordIndexEntry {
+            commit_version: 1,
+            deleted: false,
+            chunk_id: "c1".into(),
+            schema_version: 1,
+            txn_id: "T1".into(),
+            updated_ms: 1,
+        };
+        store
+            .put_record_index_with_body("s", "t", "r", &v1, &serde_json::json!({"v": 1}))
+            .unwrap();
+        v1.commit_version = 2;
+        v1.chunk_id = "c2".into();
+        v1.txn_id = "T2".into();
+        store
+            .put_record_index_with_body("s", "t", "r", &v1, &serde_json::json!({"v": 2}))
+            .unwrap();
+
+        let (entry, body) = store
+            .get_record_version_at_snapshot("s", "t", "r", 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.commit_version, 1);
+        assert_eq!(body, br#"{"v":1}"#);
+        let (entry, body) = store
+            .get_record_version_at_snapshot("s", "t", "r", 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.commit_version, 2);
+        assert_eq!(body, br#"{"v":2}"#);
+    }
+
+    #[test]
+    fn exact_chunk_update_does_not_regress_latest_pointer() {
+        let tmp = TempDir::new().unwrap();
+        let store = LocalStore::open_path(&tmp.path().join("xt.redb")).unwrap();
+        let mut entry = RecordIndexEntry {
+            commit_version: 1,
+            deleted: false,
+            chunk_id: "placeholder-1".into(),
+            schema_version: 0,
+            txn_id: "T1".into(),
+            updated_ms: 1,
+        };
+        store
+            .put_record_index_with_body("s", "t", "r", &entry, &serde_json::json!(1))
+            .unwrap();
+        entry.commit_version = 2;
+        entry.chunk_id = "placeholder-2".into();
+        entry.txn_id = "T2".into();
+        store
+            .put_record_index_with_body("s", "t", "r", &entry, &serde_json::json!(2))
+            .unwrap();
+
+        assert!(store
+            .update_record_index_chunk_id_for_version("s", "t", "r", 1, "chunk-old")
+            .unwrap());
+        assert_eq!(
+            store
+                .get_record_index("s", "t", "r")
+                .unwrap()
+                .unwrap()
+                .chunk_id,
+            "placeholder-2"
+        );
+        assert_eq!(
+            store
+                .get_record_version_at_snapshot("s", "t", "r", 1)
+                .unwrap()
+                .unwrap()
+                .0
+                .chunk_id,
+            "chunk-old"
+        );
+
+        assert!(store
+            .update_record_index_chunk_id_for_version("s", "t", "r", 2, "chunk-new")
+            .unwrap());
+        assert_eq!(
+            store
+                .get_record_index("s", "t", "r")
+                .unwrap()
+                .unwrap()
+                .chunk_id,
+            "chunk-new"
+        );
+    }
+
+    #[test]
+    fn capture_snapshot_is_current_and_pinned_atomically() {
+        let tmp = TempDir::new().unwrap();
+        let store = LocalStore::open_path(&tmp.path().join("xt.redb")).unwrap();
+        assert_eq!(store.next_global_version().unwrap(), 1);
+        assert_eq!(store.capture_and_register_snapshot().unwrap(), 1);
+        assert_eq!(store.min_active_snapshot().unwrap(), 1);
+        assert_eq!(store.count_active_snapshots().unwrap(), 1);
+    }
+
+    #[test]
+    fn gc_keeps_history_anchor_and_reclaims_it_after_unpin() {
+        let tmp = TempDir::new().unwrap();
+        let store = LocalStore::open_path(&tmp.path().join("xt.redb")).unwrap();
+        for version in [1, 5, 10] {
+            let entry = RecordIndexEntry {
+                commit_version: version,
+                deleted: false,
+                chunk_id: format!("c{version}"),
+                schema_version: 0,
+                txn_id: format!("T{version}"),
+                updated_ms: version as i64,
+            };
+            store
+                .put_record_index_with_body("s", "t", "r", &entry, &serde_json::json!(version))
+                .unwrap();
+        }
+        store.register_snapshot(7).unwrap();
+        store.gc_chains_at_active_snapshot().unwrap();
+        assert_eq!(
+            store
+                .get_record_version_at_snapshot("s", "t", "r", 7)
+                .unwrap()
+                .unwrap()
+                .0
+                .commit_version,
+            5
+        );
+        store.unregister_snapshot(7).unwrap();
+        store.gc_chains_at_active_snapshot().unwrap();
+        assert!(store
+            .get_record_version_at_snapshot("s", "t", "r", 5)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store
+                .get_record_version_at_snapshot("s", "t", "r", u64::MAX)
+                .unwrap()
+                .unwrap()
+                .0
+                .commit_version,
+            10
+        );
     }
 }

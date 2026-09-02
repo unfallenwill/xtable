@@ -37,5 +37,7 @@ xtable-backend = { path = "../xtable-backend" }
 xtable-auth = { path = "../xtable-auth" }
 http = "1.1"
 hmac = "0.12"
+base64 = { workspace = true }
+serde_json = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }

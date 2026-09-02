@@ -292,16 +292,29 @@ proptest! {
             let (visited, _removed) = store.gc_chains(pin).unwrap();
             prop_assert_eq!(visited, 1);
             let chain_after = store.read_chain("k").unwrap();
-            // After GC, all entries with commit_version < pin should be removed.
-            // (But the newest is always kept.)
+            // After GC, entries older than the newest version visible at the
+            // pin may be removed. That visibility anchor itself must remain;
+            // otherwise a reader at `pin` would see a phantom absence.
+            let anchor = unique.iter().copied().filter(|v| *v <= pin).max();
             for e in chain_after.entries.iter() {
-                prop_assert!(e.commit_version >= pin || e.commit_version == *unique.last().unwrap(),
-                    "entry with version {} should have been GC'd (pin={})", e.commit_version, pin);
+                prop_assert!(
+                    e.commit_version > pin || Some(e.commit_version) == anchor,
+                    "entry with version {} is not the snapshot anchor (pin={})",
+                    e.commit_version,
+                    pin
+                );
             }
             // Read at snapshot pin still works.
             let got = store.read_at_snapshot("k", pin).unwrap();
-            if let Some(g) = got {
-                prop_assert!(g.commit_version <= pin);
+            match (anchor, got) {
+                (Some(expected), Some(got)) => prop_assert_eq!(got.commit_version, expected),
+                (None, None) => {}
+                (Some(expected), None) => {
+                    prop_assert!(false, "snapshot anchor {} was removed", expected)
+                }
+                (None, Some(got)) => {
+                    prop_assert!(false, "future version {} became visible", got.commit_version)
+                }
             }
             Ok(())
         })?;
