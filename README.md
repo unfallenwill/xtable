@@ -356,6 +356,9 @@ DELETE /v1/spaces/:space/tables/:table/records/:rid    Delete.  → 200 {deleted
 ```
 GET    /v1/spaces/:space/tables/:table/diff   Diff two snapshots. ?s1=&s2=  → 200 {from, to, changes:[…]}
 POST   /v1/structured/txn                     Begin an explicit cross-request txn. → 201 {txn_id, snapshot_version}
+POST   /v1/structured/txn/:txn_id/write       Stage one record upsert. Body: {space,table,record_id?,body}.
+POST   /v1/structured/txn/:txn_id/commit       Commit all staged writes. → 200 {txn_id,commit_version,committed}
+POST   /v1/structured/txn/:txn_id/abort        Abort and discard all staged writes. → 200 {aborted:true}
 GET    /v1/spaces/:space/snapshot             Current snapshot version for the space.
 ```
 

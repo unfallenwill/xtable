@@ -48,6 +48,149 @@ async fn read_json(resp: axum::response::Response) -> Value {
 }
 
 #[tokio::test]
+async fn explicit_transaction_write_commit_makes_record_visible() {
+    let (app, _t) = test_app().await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/structured/txn")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let begin = read_json(resp).await;
+    let txn_id = begin["txn_id"].as_str().unwrap().to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/structured/txn/{txn_id}/write"))
+                .header("content-type", "application/json")
+                .body(json_body(json!({
+                    "space": "s",
+                    "table": "t",
+                    "record_id": "r1",
+                    "body": { "value": 1 }
+                })))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // A staged write is not visible before commit.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/spaces/s/tables/t/records/r1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/structured/txn/{txn_id}/commit"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/spaces/s/tables/t/records/r1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(read_json(resp).await["body"]["value"], 1);
+}
+
+#[tokio::test]
+async fn explicit_transaction_abort_discards_staged_write() {
+    let (app, _t) = test_app().await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/structured/txn")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let txn_id = read_json(resp).await["txn_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/structured/txn/{txn_id}/write"))
+                .header("content-type", "application/json")
+                .body(json_body(json!({
+                    "space": "s",
+                    "table": "t",
+                    "record_id": "r1",
+                    "body": { "value": 1 }
+                })))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/structured/txn/{txn_id}/abort"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/spaces/s/tables/t/records/r1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 #[ignore = "spec §5.1 removed per-record PUTs; structured-data-space reads must walk MemTable (re-enable in Task 4)"]
 async fn register_schema_then_upsert_record() {
     let (app, _t) = test_app().await;

@@ -244,6 +244,19 @@ impl StructuredSpace {
         })
     }
 
+    /// Rehydrate a transaction handle for a request that arrives after the
+    /// begin request. The coordinator remains the source of truth for the
+    /// transaction status; operations will reject handles that are no longer
+    /// active, while commit/abort preserve their normal idempotency rules.
+    pub fn txn_handle(self: &Arc<Self>, txn_id: String) -> XtableResult<StructuredTxn> {
+        let snapshot_version = self.txn.transaction_snapshot(&txn_id)?;
+        Ok(StructuredTxn {
+            txn_id,
+            snapshot_version,
+            space: Arc::downgrade(self),
+        })
+    }
+
     pub async fn heartbeat(&self, t: &StructuredTxn) -> XtableResult<()> {
         self.txn.heartbeat(&t.txn_id).await
     }

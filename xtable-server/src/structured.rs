@@ -54,6 +54,18 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route("/v1/spaces/:space/tables/:table/diff", get(diff_records))
         .route("/v1/structured/txn", post(begin_structured_txn))
+        .route(
+            "/v1/structured/txn/:txn_id/write",
+            post(write_structured_txn),
+        )
+        .route(
+            "/v1/structured/txn/:txn_id/commit",
+            post(commit_structured_txn),
+        )
+        .route(
+            "/v1/structured/txn/:txn_id/abort",
+            post(abort_structured_txn),
+        )
         .route("/v1/spaces/:space/snapshot", get(space_snapshot))
 }
 
@@ -719,6 +731,107 @@ async fn begin_structured_txn(State(state): State<Arc<AppState>>) -> Response {
             })),
         )
             .into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct StructuredTxnWriteReq {
+    space: String,
+    table: String,
+    record_id: Option<String>,
+    body: Value,
+}
+
+/// Stage one structured record write in an already-open transaction. The
+/// write is not visible until the matching commit request succeeds.
+#[tracing::instrument(
+    level = "info",
+    name = "write_structured_txn",
+    skip_all,
+    fields(txn_id = %txn_id, op = "write")
+)]
+async fn write_structured_txn(
+    State(state): State<Arc<AppState>>,
+    Path(txn_id): Path<String>,
+    Json(req): Json<StructuredTxnWriteReq>,
+) -> Response {
+    let txn = match state.structured.txn_handle(txn_id.clone()) {
+        Ok(t) => t,
+        Err(e) => return error_response(e),
+    };
+    match state
+        .structured
+        .upsert_record(
+            &txn,
+            RecordWrite {
+                space: req.space,
+                table: req.table,
+                record_id: req.record_id,
+                body: req.body,
+            },
+        )
+        .await
+    {
+        Ok(outcome) => (
+            StatusCode::OK,
+            Json(json!({
+                "txn_id": txn.txn_id,
+                "snapshot_version": txn.snapshot_version,
+                "record_id": outcome.record_id,
+                "schema_version": outcome.schema_version,
+                "backend_key": outcome.backend_key,
+            })),
+        )
+            .into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+#[tracing::instrument(
+    level = "info",
+    name = "commit_structured_txn",
+    skip_all,
+    fields(txn_id = %txn_id, op = "commit")
+)]
+async fn commit_structured_txn(
+    State(state): State<Arc<AppState>>,
+    Path(txn_id): Path<String>,
+) -> Response {
+    let txn = match state.structured.txn_handle(txn_id) {
+        Ok(t) => t,
+        Err(e) => return error_response(e),
+    };
+    match state.structured.commit_txn(&txn).await {
+        Ok(commit_version) => (
+            StatusCode::OK,
+            Json(json!({
+                "txn_id": txn.txn_id,
+                "commit_version": commit_version,
+                "committed": true,
+            })),
+        )
+            .into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+#[tracing::instrument(
+    level = "info",
+    name = "abort_structured_txn",
+    skip_all,
+    fields(txn_id = %txn_id, op = "abort")
+)]
+async fn abort_structured_txn(
+    State(state): State<Arc<AppState>>,
+    Path(txn_id): Path<String>,
+) -> Response {
+    let txn = match state.structured.txn_handle(txn_id) {
+        Ok(t) => t,
+        Err(e) => return error_response(e),
+    };
+    match state.structured.abort_txn(&txn).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "aborted": true }))).into_response(),
         Err(e) => error_response(e),
     }
 }
