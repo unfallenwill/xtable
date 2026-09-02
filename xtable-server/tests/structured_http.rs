@@ -717,6 +717,99 @@ async fn upsert_no_schema_returns_success() {
 }
 
 #[tokio::test]
+async fn batch_upsert_commits_all_records_at_one_version() {
+    let (app, _t) = test_app().await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/spaces/s/tables/t/records/batch")
+        .header("content-type", "application/json")
+        .body(json_body(json!({
+            "records": (1..=10)
+                .map(|i| json!({ "record_id": format!("r{i}"), "body": { "n": i } }))
+                .collect::<Vec<_>>()
+        })))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = read_json(resp).await;
+    assert_eq!(body["records"].as_array().unwrap().len(), 10);
+    let versions: std::collections::HashSet<_> = body["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|record| record["commit_version"].as_u64().unwrap())
+        .collect();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(
+        body["commit_version"].as_u64(),
+        versions.iter().next().copied()
+    );
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/spaces/s/tables/t/records?limit=20")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    assert_eq!(body["total_matched"], 10);
+}
+
+#[tokio::test]
+async fn batch_upsert_rolls_back_when_one_record_is_invalid() {
+    let (app, _t) = test_app().await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/spaces/s/schemas")
+        .header("content-type", "application/json")
+        .body(json_body(json!({
+            "name": "task",
+            "body": { "type": "object", "required": ["n"], "properties": { "n": { "type": "integer" } } }
+        })))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::CREATED
+    );
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/spaces/s/tables/t/bind")
+        .header("content-type", "application/json")
+        .body(json_body(json!({
+            "body": { "type": "object", "required": ["n"], "properties": { "n": { "type": "integer" } } }
+        })))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::NO_CONTENT
+    );
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/spaces/s/tables/t/records/batch")
+        .header("content-type", "application/json")
+        .body(json_body(json!({
+            "records": [
+                { "record_id": "valid", "body": { "n": 1 } },
+                { "record_id": "invalid", "body": { "n": "not-an-integer" } }
+            ]
+        })))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/spaces/s/tables/t/records/valid")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn delete_record_returns_404_when_missing() {
     let (app, _t) = test_app().await;
     let req = Request::builder()

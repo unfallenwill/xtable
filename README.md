@@ -342,6 +342,8 @@ POST   /v1/spaces/:space/tables/:table/bind   Bind table to schema. Body: {body}
 ```
 POST   /v1/spaces/:space/tables/:table/records         Upsert. Body: {record_id?, body}.
                                                      → 201 {record_id, schema_version, backend_key, commit_version}
+POST   /v1/spaces/:space/tables/:table/records/batch   Atomic batch upsert. Body: {records:[{record_id?,body}]}.
+                                                     → 201 {records:[…], commit_version}
 GET    /v1/spaces/:space/tables/:table/records         Query.   ?snapshot=&limit=&offset=&sort=&dir=
                                                      &filter_field=&filter_op=&filter_value=
                                                      → 200 {snapshot_version, total_matched, records:[…]}

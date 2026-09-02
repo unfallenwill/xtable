@@ -2,9 +2,7 @@
 //!
 //! All routes are mounted under `/v1/spaces/:space/...`. Each write request
 //! runs in its own short-lived transaction so multi-record atomicity per
-//! request is guaranteed. For cross-request atomicity across multiple HTTP
-//! calls, use the explicit `/v1/structured/txn` endpoint to obtain a
-//! `txn_id` and pass it back through the structured-space APIs.
+//! request is guaranteed. Batch writes use one transaction for all records.
 //!
 //! Error responses are JSON: `{"error": "<msg>", "code": "<s3-style>"}`.
 //!
@@ -45,6 +43,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route(
             "/v1/spaces/:space/tables/:table/records",
             post(upsert_record).get(query_records),
+        )
+        .route(
+            "/v1/spaces/:space/tables/:table/records/batch",
+            post(batch_upsert_records),
         )
         .route(
             "/v1/spaces/:space/tables/:table/records/:record_id",
@@ -257,6 +259,17 @@ struct UpsertRecordResp {
     commit_version: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct BatchUpsertRecordsReq {
+    records: Vec<UpsertRecordReq>,
+}
+
+#[derive(Debug, Serialize)]
+struct BatchUpsertRecordsResp {
+    records: Vec<UpsertRecordResp>,
+    commit_version: u64,
+}
+
 #[tracing::instrument(
     level = "info",
     name = "upsert_record",
@@ -312,6 +325,85 @@ async fn upsert_record(
                 schema_version: o.schema_version,
                 backend_key: o.backend_key,
                 commit_version: c,
+            }),
+        )
+            .into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+#[tracing::instrument(
+    level = "info",
+    name = "batch_upsert_records",
+    skip_all,
+    fields(space = %space, table = %table, op = "batch_upsert_records"),
+)]
+async fn batch_upsert_records(
+    State(state): State<Arc<AppState>>,
+    Path((space, table)): Path<(String, String)>,
+    Json(req): Json<BatchUpsertRecordsReq>,
+) -> Response {
+    if req.records.is_empty() {
+        return error_response(XtableError::invalid("records must not be empty"));
+    }
+
+    let _timed = Timed::new(
+        &state.metrics.txn_commit_duration,
+        vec![
+            KeyValue::new("space", space.clone()),
+            KeyValue::new("table", table.clone()),
+        ],
+    );
+    let result: XtableResult<(Vec<WriteOutcome>, u64)> = async {
+        let t = state.structured.begin_txn().await?;
+        let mut outcomes = Vec::with_capacity(req.records.len());
+        for record in req.records {
+            let outcome = state
+                .structured
+                .upsert_record(
+                    &t,
+                    RecordWrite {
+                        space: space.clone(),
+                        table: table.clone(),
+                        record_id: record.record_id,
+                        body: record.body,
+                    },
+                )
+                .await;
+            match outcome {
+                Ok(outcome) => outcomes.push(outcome),
+                Err(err) => {
+                    let _ = state.structured.abort_txn(&t).await;
+                    return Err(err);
+                }
+            }
+        }
+        let commit = state.structured.commit_txn(&t).await?;
+        Ok((outcomes, commit))
+    }
+    .await;
+
+    state.metrics.txn_commit_total.add(
+        1,
+        &[KeyValue::new(
+            "outcome",
+            if result.is_ok() { "ok" } else { "err" },
+        )],
+    );
+    match result {
+        Ok((outcomes, commit_version)) => (
+            StatusCode::CREATED,
+            Json(BatchUpsertRecordsResp {
+                records: outcomes
+                    .into_iter()
+                    .map(|outcome| UpsertRecordResp {
+                        record_id: outcome.record_id,
+                        schema_version: outcome.schema_version,
+                        backend_key: outcome.backend_key,
+                        commit_version,
+                    })
+                    .collect(),
+                commit_version,
             }),
         )
             .into_response(),
