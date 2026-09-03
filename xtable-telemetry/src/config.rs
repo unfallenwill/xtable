@@ -101,7 +101,8 @@ pub fn load_from_env() -> Option<TelemetryConfig> {
 /// Merge env-derived config over TOML `observability` section.
 ///
 /// Returns `None` when env-derived config is `None` (telemetry disabled).
-/// Only fields that differ from the env default are overridden by TOML.
+/// TOML fills resource and operational defaults without overriding explicit
+/// environment-selected endpoint, protocol, or profile values.
 pub fn merge_with_toml(
     env_cfg: Option<TelemetryConfig>,
     toml: &xtable_core::config::ObservabilityConfig,
@@ -116,7 +117,9 @@ pub fn merge_with_toml(
     if let Some(id) = &toml.service_instance_id {
         cfg.service_instance_id = id.clone();
     }
-    cfg.profile = Profile::from_str(&toml.profile).unwrap_or(cfg.profile);
+    // The endpoint is the opt-in switch and all explicitly resolved
+    // environment values must remain authoritative once telemetry is
+    // enabled. TOML still supplies the service/resource defaults below.
     if cfg.trace_sample_ratio.is_none() {
         cfg.trace_sample_ratio = toml.trace_sample_ratio;
     }

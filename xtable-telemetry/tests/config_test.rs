@@ -65,3 +65,15 @@ fn trace_sample_ratio_clamped_or_ignored() {
         assert!(load_from_env().unwrap().trace_sample_ratio.is_none());
     })
 }
+
+#[test]
+fn merge_keeps_environment_profile() {
+    clear(|| {
+        std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel:4317");
+        std::env::set_var("OTEL_PROFILE", "dev");
+        let env_cfg = load_from_env().unwrap();
+        let toml = xtable_core::config::ObservabilityConfig::default();
+        let merged = merge_with_toml(Some(env_cfg), &toml).unwrap();
+        assert_eq!(merged.profile, Profile::Dev);
+    })
+}

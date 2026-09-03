@@ -34,7 +34,19 @@ async fn main() -> anyhow::Result<()> {
     // run before `Metrics::new` so the meter handles bind to the live
     // `SdkMeterProvider` (OTel 0.27 instruments are permanently bound to
     // the `Meter` that created them).
-    let _guard = xtable_telemetry::init::init(&config.observability.clone().into())?;
+    // Environment variables provide the OTLP endpoint, transport, and
+    // profile, while the TOML observability block supplies service/resource
+    // defaults. A plain
+    // `into()` would intentionally leave endpoint unset and silently disable
+    // export, even when OTEL_EXPORTER_OTLP_ENDPOINT was configured.
+    let telemetry_cfg = match xtable_telemetry::config::load_from_env() {
+        Some(env_cfg) => {
+            xtable_telemetry::config::merge_with_toml(Some(env_cfg), &config.observability)
+                .expect("environment telemetry config must be present")
+        }
+        None => config.observability.clone().into(),
+    };
+    let _guard = xtable_telemetry::init::init(&telemetry_cfg)?;
 
     info!(
         listen = %config.server.listen,
