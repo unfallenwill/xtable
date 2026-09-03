@@ -154,7 +154,7 @@ mod tests {
         ];
         // Per-txn records: txn_id() returns Some("T1").
         // (MemtableFlushed is a global record and returns None — tested separately below.)
-        for (_i, r) in records[..6].iter().enumerate() {
+        for r in records[..6].iter() {
             assert_eq!(r.txn_id(), Some("T1"));
         }
         // PR-Fix2.3: MemtableFlushed is a global record; txn_id returns None

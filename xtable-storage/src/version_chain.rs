@@ -91,13 +91,10 @@ impl VersionChain {
     /// Read at snapshot S: walk from newest, pick first entry with
     /// `commit_version ≤ S`. Returns None if no such entry.
     pub fn read_at_snapshot(&self, snapshot: u64) -> Option<&VersionEntry> {
-        // entries is sorted ascending; iterate descending to find newest ≤ S.
-        for entry in self.entries.iter().rev() {
-            if entry.commit_version <= snapshot {
-                return Some(entry);
-            }
-        }
-        None
+        self.entries
+            .iter()
+            .rev()
+            .find(|entry| entry.commit_version <= snapshot)
     }
 
     /// Newest entry's commit_version, or 0 if empty.

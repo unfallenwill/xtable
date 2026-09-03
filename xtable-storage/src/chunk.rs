@@ -622,7 +622,7 @@ pub fn decompress_body(file: &[u8]) -> XtableResult<Vec<u8>> {
 fn build_bloom(keys: &[Vec<u8>], bits_per_key: usize) -> Vec<u8> {
     let n_keys = keys.len().max(1);
     let total_bits = (n_keys * bits_per_key).max(64);
-    let total_bytes = (total_bits + 7) / 8;
+    let total_bytes = total_bits.div_ceil(8);
     let mut bits = vec![0u8; total_bytes];
     for k in keys {
         let h1 = xxh3::xxh3_64(k);
@@ -741,7 +741,7 @@ mod tests {
     #[test]
     fn truncated_chunk_header_does_not_panic() {
         // Magic only — header parse should fail with Storage, not panic.
-        let r = ChunkHeader::decode(&[b'X', b'T', b'C', b'1']);
+        let r = ChunkHeader::decode(b"XTC1");
         assert!(r.is_err(), "expected Storage error, got {:?}", r.ok());
 
         // Magic + version, but truncated before chunk_id_len.

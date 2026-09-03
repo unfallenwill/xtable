@@ -121,9 +121,9 @@ pub const TBL_SI_EDGES: TableDefinition<(&str, &str, &str, &str), &[u8]> =
 ///
 /// - `Live`:      Normal serving state; reads can target this chunk.
 /// - `Compacting`: Reserved for a future compaction step (currently unused;
-///                 future levels may carry this state).
+///   future levels may carry this state).
 /// - `Deleted`:   Marked for removal; the GC sweep will issue
-///                `DeleteObjects` and remove the row.
+///   `DeleteObjects` and remove the row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ChunkStatus {
     Live,

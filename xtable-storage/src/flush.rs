@@ -79,9 +79,8 @@ pub async fn flush_loop(
         }
         let immutables = memtables.take_immutables().await;
         for mt in immutables {
-            let r = flush_one(&mt, &store, backend.clone()).await;
-            if r.is_err() {
-                tracing::error!(error=%r.unwrap_err(), "flush failed; will retry on next rotation");
+            if let Err(err) = flush_one(&mt, &store, backend.clone()).await {
+                tracing::error!(error=%err, "flush failed; will retry on next rotation");
                 // Re-push the memtable so we retry on the next rotation.
                 memtables.flushing.lock().push(mt);
             }
