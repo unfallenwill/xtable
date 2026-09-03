@@ -303,7 +303,7 @@ impl StructuredSpace {
         if !body.is_object() {
             return Err(XtableError::invalid("schema body must be a JSON object"));
         }
-        let next = self.next_schema_version(space, name)?;
+        let next = self.next_schema_version(&t.txn_id, space, name)?;
         let key = schema_key(space, name, next)?;
         let raw = serde_json::to_vec(&body).map_err(XtableError::from)?;
         // Spec §5.1: the body is staged and routed into the MemTable
@@ -350,7 +350,7 @@ impl StructuredSpace {
             ));
         }
         let alias_name = format!("_table::{table}");
-        let next = self.next_schema_version(space, &alias_name)?;
+        let next = self.next_schema_version(&t.txn_id, space, &alias_name)?;
         let key = schema_key(space, &alias_name, next)?;
         let raw = serde_json::to_vec(&body).map_err(XtableError::from)?;
         // Spec §5.1: drop x-xtable-* metadata — chunks don't need it.
@@ -468,7 +468,13 @@ impl StructuredSpace {
         Ok(out)
     }
 
-    fn next_schema_version(&self, space: &str, name: &str) -> XtableResult<u32> {
+    fn next_schema_version(&self, txn_id: &str, space: &str, name: &str) -> XtableResult<u32> {
+        if let Some(version) = self
+            .pending
+            .latest_schema_version_in_txn(txn_id, space, name)
+        {
+            return Ok(version + 1);
+        }
         Ok(match self.store.get_schema_index(space, name)? {
             Some(idx) => idx.latest_version + 1,
             None => 1,

@@ -59,6 +59,11 @@ pub fn router() -> Router<Arc<AppState>> {
             post(write_structured_txn),
         )
         .route(
+            "/v1/structured/txn/:txn_id/schema",
+            post(register_schema_in_txn),
+        )
+        .route("/v1/structured/txn/:txn_id/bind", post(bind_table_in_txn))
+        .route(
             "/v1/structured/txn/:txn_id/commit",
             post(commit_structured_txn),
         )
@@ -741,6 +746,92 @@ struct StructuredTxnWriteReq {
     table: String,
     record_id: Option<String>,
     body: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct StructuredTxnSchemaReq {
+    space: String,
+    name: String,
+    body: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct StructuredTxnBindReq {
+    space: String,
+    table: String,
+    body: Value,
+}
+
+/// Register a schema version inside an explicit transaction. The schema is
+/// visible to readers only after the transaction commits.
+#[tracing::instrument(
+    level = "info",
+    name = "register_schema_in_txn",
+    skip_all,
+    fields(txn_id = %txn_id, op = "register_schema")
+)]
+async fn register_schema_in_txn(
+    State(state): State<Arc<AppState>>,
+    Path(txn_id): Path<String>,
+    Json(req): Json<StructuredTxnSchemaReq>,
+) -> Response {
+    let txn = match state.structured.txn_handle(txn_id.clone()) {
+        Ok(t) => t,
+        Err(e) => return error_response(e),
+    };
+    match state
+        .structured
+        .register_schema(&txn, &req.space, &req.name, req.body)
+        .await
+    {
+        Ok(version) => (
+            StatusCode::OK,
+            Json(json!({
+                "txn_id": txn_id,
+                "space": req.space,
+                "name": req.name,
+                "version": version,
+            })),
+        )
+            .into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+/// Bind a table to a schema body inside an explicit transaction. This is a
+/// metadata write in the same commit set as record writes.
+#[tracing::instrument(
+    level = "info",
+    name = "bind_table_in_txn",
+    skip_all,
+    fields(txn_id = %txn_id, op = "bind_table")
+)]
+async fn bind_table_in_txn(
+    State(state): State<Arc<AppState>>,
+    Path(txn_id): Path<String>,
+    Json(req): Json<StructuredTxnBindReq>,
+) -> Response {
+    let txn = match state.structured.txn_handle(txn_id.clone()) {
+        Ok(t) => t,
+        Err(e) => return error_response(e),
+    };
+    match state
+        .structured
+        .bind_table_schema(&txn, &req.space, &req.table, req.body)
+        .await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({
+                "txn_id": txn_id,
+                "space": req.space,
+                "table": req.table,
+                "bound": true,
+            })),
+        )
+            .into_response(),
+        Err(e) => error_response(e),
+    }
 }
 
 /// Stage one structured record write in an already-open transaction. The

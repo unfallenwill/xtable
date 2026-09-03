@@ -532,15 +532,23 @@ impl TxnCoordinator {
             return Err(TxnError::Conflict(format!("SSI cycle with {}", peer)).into());
         }
 
-        // 4. Allocate new versions per key. Sort for deterministic ordering.
+        // 4. Allocate one commit version for the whole transaction. Every
+        // key in a multi-table / multi-schema commit must share this epoch;
+        // otherwise a historical snapshot between per-key versions could
+        // observe only part of the transaction.
         let mut sorted_keys: Vec<String> = txn.write_keys.clone();
         sorted_keys.sort();
-        let mut alloc_versions: Vec<(String, u64)> = Vec::with_capacity(sorted_keys.len());
-        for k in &sorted_keys {
-            // We're committing, so global_version must advance at least once.
-            let v = self.store.next_global_version()?;
-            alloc_versions.push((k.clone(), v));
-        }
+        // Empty transactions are successful no-ops and must not advance the
+        // global version. A transaction with writes gets one shared epoch.
+        let commit_version = if sorted_keys.is_empty() {
+            txn.snapshot_version
+        } else {
+            self.store.next_global_version()?
+        };
+        let alloc_versions: Vec<(String, u64)> = sorted_keys
+            .iter()
+            .map(|key| (key.clone(), commit_version))
+            .collect();
 
         // V7 fix: write WAL Committing BEFORE any uploads. The Committing
         // record's upload_keys field is the full intended set; on crash,
@@ -653,12 +661,6 @@ impl TxnCoordinator {
             ));
         }
         self.store.put_versions_bulk(&version_updates)?;
-
-        let commit_version = alloc_versions
-            .iter()
-            .map(|(_, v)| *v)
-            .max()
-            .unwrap_or(txn.snapshot_version);
 
         // 9. Mark committed (WAL + TxnState).
         self.store.append_wal(&WalRecord::Committed {

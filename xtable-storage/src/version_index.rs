@@ -28,3 +28,20 @@ impl Default for VersionRecord {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_record_is_an_empty_non_tombstone() {
+        let record = VersionRecord::default();
+        assert_eq!(record.latest_version, Version::ZERO);
+        assert!(record.latest_etag.is_empty());
+        assert!(record.latest_backend_key.is_empty());
+        assert!(record.last_writer_txn_id.is_empty());
+        assert!(!record.tombstone);
+        assert_eq!(record.size, 0);
+        assert_eq!(record.last_modified_unix_ms, 0);
+    }
+}

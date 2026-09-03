@@ -119,3 +119,48 @@ impl From<Box<bincode::ErrorKind>> for XtableError {
         Self::Serde(e.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constructors_and_wire_mappings_cover_all_variants() {
+        let errors = vec![
+            (XtableError::invalid("bad"), 400, "InvalidArgument"),
+            (
+                XtableError::Unauthorized("no token".into()),
+                401,
+                "Unauthorized",
+            ),
+            (XtableError::Forbidden("no access".into()), 403, "Forbidden"),
+            (XtableError::not_found("missing"), 404, "NoSuchKey"),
+            (XtableError::UnknownTxn("txn".into()), 404, "UnknownTxn"),
+            (XtableError::conflict("race"), 409, "TransactionConflict"),
+            (XtableError::TxnExpired("old".into()), 410, "TxnExpired"),
+            (XtableError::storage("disk"), 500, "InternalError"),
+            (
+                XtableError::Io(std::io::Error::other("io")),
+                500,
+                "InternalError",
+            ),
+            (XtableError::backend("s3"), 502, "BackendError"),
+            (XtableError::Serde("json".into()), 500, "InternalError"),
+            (XtableError::internal("bug"), 500, "InternalError"),
+            (XtableError::not_implemented("later"), 501, "NotImplemented"),
+        ];
+        for (error, status, code) in errors {
+            assert_eq!(error.http_status(), status);
+            assert_eq!(error.s3_code(), code);
+            assert!(!error.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn serde_errors_are_converted() {
+        let json = serde_json::from_str::<u8>("not-json").unwrap_err();
+        assert!(matches!(XtableError::from(json), XtableError::Serde(_)));
+        let bin = Box::new(bincode::ErrorKind::Custom("bad".into()));
+        assert!(matches!(XtableError::from(bin), XtableError::Serde(_)));
+    }
+}

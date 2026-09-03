@@ -40,3 +40,24 @@ impl From<TxnError> for XtableError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_transaction_errors_map_to_public_errors() {
+        let cases = [
+            (TxnError::Conflict("k".into()), 409),
+            (TxnError::Aborted("cancelled".into()), 409),
+            (TxnError::Expired, 410),
+            (TxnError::UnknownTxn("t".into()), 404),
+            (TxnError::Backend("s3".into()), 502),
+            (TxnError::Storage("disk".into()), 500),
+            (TxnError::InvalidState("state".into()), 500),
+        ];
+        for (error, status) in cases {
+            assert_eq!(XtableError::from(error).http_status(), status);
+        }
+    }
+}

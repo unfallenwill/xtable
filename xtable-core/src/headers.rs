@@ -33,3 +33,22 @@ impl std::fmt::Display for TxnStatus {
         f.write_str(self.as_str())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_strings_and_display_are_stable() {
+        let cases = [
+            (TxnStatus::Active, "active"),
+            (TxnStatus::Committing, "committing"),
+            (TxnStatus::Committed, "committed"),
+            (TxnStatus::Aborted, "aborted"),
+        ];
+        for (status, expected) in cases {
+            assert_eq!(status.as_str(), expected);
+            assert_eq!(status.to_string(), expected);
+        }
+    }
+}

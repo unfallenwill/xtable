@@ -900,6 +900,163 @@ async fn batch_upsert_commits_all_records_at_one_version() {
 }
 
 #[tokio::test]
+async fn explicit_transaction_commits_records_with_different_schemas_at_one_snapshot() {
+    let (app, _t) = test_app().await;
+
+    for (name, table, field) in [("user", "users", "name"), ("order", "orders", "total")] {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/spaces/s/schemas")
+            .header("content-type", "application/json")
+            .body(json_body(json!({
+                "name": name,
+                "body": { "type": "object", "required": [field] }
+            })))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::CREATED
+        );
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/v1/spaces/s/tables/{table}/bind"))
+            .header("content-type", "application/json")
+            .body(json_body(json!({
+                "body": { "type": "object", "required": [field] }
+            })))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/structured/txn")
+        .body(Body::empty())
+        .unwrap();
+    let txn_id = read_json(app.clone().oneshot(req).await.unwrap()).await["txn_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    for (table, record_id, body) in [
+        ("users", "u1", json!({ "name": "Ada" })),
+        ("orders", "o1", json!({ "total": 42 })),
+    ] {
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/v1/structured/txn/{txn_id}/write"))
+            .header("content-type", "application/json")
+            .body(json_body(json!({
+                "space": "s",
+                "table": table,
+                "record_id": record_id,
+                "body": body
+            })))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/v1/structured/txn/{txn_id}/commit"))
+        .body(Body::empty())
+        .unwrap();
+    let commit = read_json(app.clone().oneshot(req).await.unwrap()).await;
+    assert_eq!(commit["committed"], true);
+    let commit_version = commit["commit_version"].as_u64().unwrap();
+
+    for (table, record_id, field) in [("users", "u1", "name"), ("orders", "o1", "total")] {
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/v1/spaces/s/tables/{table}/records/{record_id}"))
+            .body(Body::empty())
+            .unwrap();
+        let record = read_json(app.clone().oneshot(req).await.unwrap()).await;
+        assert_eq!(record["commit_version"], commit_version);
+        assert!(record["body"].get(field).is_some());
+    }
+}
+
+#[tokio::test]
+async fn explicit_transaction_aborts_schema_binding_and_record_together() {
+    let (app, _t) = test_app().await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/structured/txn")
+        .body(Body::empty())
+        .unwrap();
+    let txn_id = read_json(app.clone().oneshot(req).await.unwrap()).await["txn_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/v1/structured/txn/{txn_id}/bind"))
+        .header("content-type", "application/json")
+        .body(json_body(json!({
+            "space": "s",
+            "table": "t",
+            "body": { "type": "object", "required": ["n"], "properties": { "n": { "type": "integer" } } }
+        })))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/v1/structured/txn/{txn_id}/write"))
+        .header("content-type", "application/json")
+        .body(json_body(json!({
+            "space": "s",
+            "table": "t",
+            "record_id": "r1",
+            "body": { "n": 1 }
+        })))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/v1/structured/txn/{txn_id}/abort"))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    // The binding was part of the aborted transaction. An unconstrained
+    // body is accepted by a later short transaction, proving the metadata
+    // write was discarded together with the record write.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/spaces/s/tables/t/records")
+        .header("content-type", "application/json")
+        .body(json_body(json!({
+            "record_id": "r2",
+            "body": { "not_n": "accepted" }
+        })))
+        .unwrap();
+    assert_eq!(
+        app.oneshot(req).await.unwrap().status(),
+        StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
 async fn batch_upsert_rolls_back_when_one_record_is_invalid() {
     let (app, _t) = test_app().await;
     let req = Request::builder()

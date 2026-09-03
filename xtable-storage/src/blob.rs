@@ -52,3 +52,44 @@ impl BodyHandle {
         Err(XtableError::InvalidArgument("empty body handle".into()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn inline_body_reports_length_and_reads_a_copy() {
+        let body = BodyHandle::inline(vec![1, 2, 3]);
+        assert_eq!(body.len(), 3);
+        assert!(!body.is_empty());
+        assert_eq!(body.read().await.unwrap(), vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn empty_and_spilled_bodies_are_supported() {
+        let empty = BodyHandle {
+            inline: None,
+            spilled: None,
+        };
+        assert_eq!(empty.len(), 0);
+        assert!(empty.is_empty());
+        assert!(matches!(
+            empty.read().await,
+            Err(XtableError::InvalidArgument(_))
+        ));
+
+        let path = std::env::temp_dir().join(format!("xtable-body-{}", ulid::Ulid::new()));
+        tokio::fs::write(&path, b"spill").await.unwrap();
+        let spilled = BodyHandle {
+            inline: None,
+            spilled: Some(SpilledBlob {
+                path: path.clone(),
+                size: 5,
+                sha256: "".into(),
+            }),
+        };
+        assert_eq!(spilled.len(), 5);
+        assert_eq!(spilled.read().await.unwrap(), b"spill");
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+}

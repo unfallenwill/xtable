@@ -59,3 +59,23 @@ impl From<BackendError> for xtable_core::XtableError {
 }
 
 pub type BackendResult<T> = std::result::Result<T, BackendError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_errors_map_to_xtable_errors() {
+        let cases = [
+            (BackendError::NotFound("x".into()), 404),
+            (BackendError::InvalidArgument("x".into()), 400),
+            (BackendError::Unreachable("x".into()), 502),
+            (BackendError::Upload("x".into()), 502),
+            (BackendError::Sdk("x".into()), 502),
+            (BackendError::Internal("x".into()), 502),
+        ];
+        for (error, status) in cases {
+            assert_eq!(xtable_core::XtableError::from(error).http_status(), status);
+        }
+    }
+}

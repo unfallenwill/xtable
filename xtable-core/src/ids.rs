@@ -136,4 +136,24 @@ mod tests {
         let parsed = TxnId::from_string(&s).unwrap();
         assert_eq!(id, parsed);
     }
+
+    #[test]
+    fn versions_and_object_keys_have_expected_formats() {
+        assert_eq!(Version::ZERO.to_string(), "0");
+        assert_eq!(format!("{:?}", Version(7)), "v7");
+        let key = ObjectKey::new("a/b");
+        assert_eq!(key.as_str(), "a/b");
+        assert_eq!(key.len(), 3);
+        assert!(!key.is_empty());
+        assert_eq!(key.as_ref(), "a/b");
+        assert_eq!(key.to_string(), "a/b");
+        assert_eq!(format!("{:?}", key), "\"a/b\"");
+        assert_eq!(key.clone().into_string(), "a/b");
+    }
+
+    #[test]
+    fn invalid_txn_id_is_rejected() {
+        assert!(TxnId::from_string("not-a-ulid").is_err());
+        assert_eq!(TxnId::default().as_ulid().to_string().len(), 26);
+    }
 }
