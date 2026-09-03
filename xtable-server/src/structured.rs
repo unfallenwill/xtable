@@ -9,10 +9,8 @@
 //! Observability (Phase 6, Task 6.3):
 //! - Every handler is wrapped in `#[tracing::instrument]` so it emits a
 //!   span with `space` / `table` / `record_id` attributes as appropriate.
-//! - Write paths additionally hold a `Timed` guard against
-//!   `state.metrics.txn_commit_duration` and bump
-//!   `state.metrics.txn_commit_total{outcome=ok|err}` so the commit
-//!   hot-path is visible on dashboards.
+//! - Transaction commit metrics are recorded at the coordinator boundary;
+//!   handlers only provide request spans and HTTP RED metrics.
 
 use std::sync::Arc;
 
@@ -27,8 +25,6 @@ use serde_json::{json, Value};
 
 use xtable_core::{XtableError, XtableResult};
 use xtable_schema::{Filter, OrderDir, Query as StructuredQuery, RecordWrite, WriteOutcome};
-use xtable_telemetry::timed::Timed;
-use xtable_telemetry::KeyValue;
 
 use crate::app::AppState;
 
@@ -82,7 +78,7 @@ struct RegisterSchemaReq {
 
 #[tracing::instrument(
     level = "info",
-    name = "register_schema",
+    name = "http.schema.register",
     skip_all,
     fields(space = %space, op = "register_schema"),
 
@@ -93,10 +89,6 @@ async fn register_schema(
     Path(space): Path<String>,
     Json(req): Json<RegisterSchemaReq>,
 ) -> Response {
-    let _timed = Timed::new(
-        &state.metrics.txn_commit_duration,
-        vec![KeyValue::new("space", space.clone())],
-    );
     let space_in = space.clone();
     let name_in = req.name.clone();
     let body_in = req.body.clone();
@@ -110,13 +102,6 @@ async fn register_schema(
         Ok(v)
     }
     .await;
-    state.metrics.txn_commit_total.add(
-        1,
-        &[KeyValue::new(
-            "outcome",
-            if result.is_ok() { "ok" } else { "err" },
-        )],
-    );
     match result {
         Ok(version) => (
             StatusCode::CREATED,
@@ -135,7 +120,7 @@ struct SchemaQuery {
 
 #[tracing::instrument(
     level = "info",
-    name = "get_schema",
+    name = "http.schema.get",
     skip_all,
     fields(space = %space, name = %name, op = "get_schema"),
 
@@ -182,7 +167,7 @@ async fn get_schema(
 
 #[tracing::instrument(
     level = "info",
-    name = "list_schemas",
+    name = "http.schema.list",
     skip_all,
     fields(space = %space, op = "list_schemas"),
 
@@ -218,7 +203,7 @@ struct BindReq {
 
 #[tracing::instrument(
     level = "info",
-    name = "bind_table",
+    name = "http.table.bind",
     skip_all,
     fields(space = %space, table = %table, op = "bind_table"),
 
@@ -229,13 +214,6 @@ async fn bind_table(
     Path((space, table)): Path<(String, String)>,
     Json(req): Json<BindReq>,
 ) -> Response {
-    let _timed = Timed::new(
-        &state.metrics.txn_commit_duration,
-        vec![
-            KeyValue::new("space", space.clone()),
-            KeyValue::new("table", table.clone()),
-        ],
-    );
     let space_in = space.clone();
     let table_in = table.clone();
     let body_in = req.body.clone();
@@ -249,13 +227,6 @@ async fn bind_table(
         Ok(())
     }
     .await;
-    state.metrics.txn_commit_total.add(
-        1,
-        &[KeyValue::new(
-            "outcome",
-            if result.is_ok() { "ok" } else { "err" },
-        )],
-    );
     match result {
         Ok(()) => (StatusCode::NO_CONTENT, "").into_response(),
         Err(e) => error_response(e),
@@ -289,7 +260,7 @@ struct BatchUpsertRecordsResp {
 
 #[tracing::instrument(
     level = "info",
-    name = "upsert_record",
+    name = "http.record.upsert",
     skip_all,
     fields(space = %space, table = %table, op = "upsert_record"),
 
@@ -300,13 +271,6 @@ async fn upsert_record(
     Path((space, table)): Path<(String, String)>,
     Json(req): Json<UpsertRecordReq>,
 ) -> Response {
-    let _timed = Timed::new(
-        &state.metrics.txn_commit_duration,
-        vec![
-            KeyValue::new("space", space.clone()),
-            KeyValue::new("table", table.clone()),
-        ],
-    );
     let space_in = space.clone();
     let table_in = table.clone();
     let result: XtableResult<(WriteOutcome, u64)> = async {
@@ -327,13 +291,6 @@ async fn upsert_record(
         Ok((outcome, commit))
     }
     .await;
-    state.metrics.txn_commit_total.add(
-        1,
-        &[KeyValue::new(
-            "outcome",
-            if result.is_ok() { "ok" } else { "err" },
-        )],
-    );
     match result {
         Ok((o, c)) => (
             StatusCode::CREATED,
@@ -351,7 +308,7 @@ async fn upsert_record(
 
 #[tracing::instrument(
     level = "info",
-    name = "batch_upsert_records",
+    name = "http.record.batch_upsert",
     skip_all,
     fields(space = %space, table = %table, op = "batch_upsert_records"),
 )]
@@ -364,13 +321,6 @@ async fn batch_upsert_records(
         return error_response(XtableError::invalid("records must not be empty"));
     }
 
-    let _timed = Timed::new(
-        &state.metrics.txn_commit_duration,
-        vec![
-            KeyValue::new("space", space.clone()),
-            KeyValue::new("table", table.clone()),
-        ],
-    );
     let result: XtableResult<(Vec<WriteOutcome>, u64)> = async {
         let t = state.structured.begin_txn().await?;
         let mut outcomes = Vec::with_capacity(req.records.len());
@@ -400,13 +350,6 @@ async fn batch_upsert_records(
     }
     .await;
 
-    state.metrics.txn_commit_total.add(
-        1,
-        &[KeyValue::new(
-            "outcome",
-            if result.is_ok() { "ok" } else { "err" },
-        )],
-    );
     match result {
         Ok((outcomes, commit_version)) => (
             StatusCode::CREATED,
@@ -435,7 +378,7 @@ struct GetRecordQuery {
 
 #[tracing::instrument(
     level = "info",
-    name = "get_record",
+    name = "http.record.get",
     skip_all,
     fields(
         space = %space,
@@ -485,7 +428,7 @@ async fn get_record(
 
 #[tracing::instrument(
     level = "info",
-    name = "delete_record",
+    name = "http.record.delete",
     skip_all,
     fields(
         space = %space,
@@ -500,13 +443,6 @@ async fn delete_record(
     State(state): State<Arc<AppState>>,
     Path((space, table, record_id)): Path<(String, String, String)>,
 ) -> Response {
-    let _timed = Timed::new(
-        &state.metrics.txn_commit_duration,
-        vec![
-            KeyValue::new("space", space.clone()),
-            KeyValue::new("table", table.clone()),
-        ],
-    );
     let space_in = space.clone();
     let table_in = table.clone();
     let record_in = record_id.clone();
@@ -520,13 +456,6 @@ async fn delete_record(
         Ok(cv)
     }
     .await;
-    state.metrics.txn_commit_total.add(
-        1,
-        &[KeyValue::new(
-            "outcome",
-            if result.is_ok() { "ok" } else { "err" },
-        )],
-    );
     match result {
         Ok(cv) => (
             StatusCode::OK,
@@ -551,7 +480,7 @@ struct QueryParams {
 
 #[tracing::instrument(
     level = "info",
-    name = "query_records",
+    name = "http.record.query",
     skip_all,
     fields(space = %space, table = %table, op = "query_records"),
 
@@ -681,7 +610,7 @@ struct DiffQuery {
 
 #[tracing::instrument(
     level = "info",
-    name = "diff_records",
+    name = "http.record.diff",
     skip_all,
     fields(space = %space, table = %table, op = "diff_records"),
 
@@ -722,7 +651,7 @@ async fn diff_records(
 
 #[tracing::instrument(
     level = "info",
-    name = "begin_structured_txn",
+    name = "http.txn.begin",
     skip_all,
     fields(op = "begin_structured_txn")
 )]
@@ -766,7 +695,7 @@ struct StructuredTxnBindReq {
 /// visible to readers only after the transaction commits.
 #[tracing::instrument(
     level = "info",
-    name = "register_schema_in_txn",
+    name = "http.txn.schema",
     skip_all,
     fields(txn_id = %txn_id, op = "register_schema")
 )]
@@ -802,7 +731,7 @@ async fn register_schema_in_txn(
 /// metadata write in the same commit set as record writes.
 #[tracing::instrument(
     level = "info",
-    name = "bind_table_in_txn",
+    name = "http.txn.bind",
     skip_all,
     fields(txn_id = %txn_id, op = "bind_table")
 )]
@@ -838,7 +767,7 @@ async fn bind_table_in_txn(
 /// write is not visible until the matching commit request succeeds.
 #[tracing::instrument(
     level = "info",
-    name = "write_structured_txn",
+    name = "http.txn.write",
     skip_all,
     fields(txn_id = %txn_id, op = "write")
 )]
@@ -881,7 +810,7 @@ async fn write_structured_txn(
 
 #[tracing::instrument(
     level = "info",
-    name = "commit_structured_txn",
+    name = "http.txn.commit",
     skip_all,
     fields(txn_id = %txn_id, op = "commit")
 )]
@@ -909,7 +838,7 @@ async fn commit_structured_txn(
 
 #[tracing::instrument(
     level = "info",
-    name = "abort_structured_txn",
+    name = "http.txn.abort",
     skip_all,
     fields(txn_id = %txn_id, op = "abort")
 )]
@@ -929,7 +858,7 @@ async fn abort_structured_txn(
 
 #[tracing::instrument(
     level = "info",
-    name = "space_snapshot",
+    name = "http.space.snapshot",
     skip_all,
     fields(space = %space, op = "space_snapshot"),
 

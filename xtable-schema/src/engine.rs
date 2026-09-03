@@ -17,7 +17,7 @@
 //! - pin a snapshot explicitly with `pin_snapshot(snapshot_version)`.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use chrono::Utc;
 use serde_json::Value;
@@ -26,20 +26,11 @@ use tracing::{info, warn};
 use xtable_backend::BackendClient;
 use xtable_core::{ObjectKey, XtableError, XtableResult};
 use xtable_storage::{LocalStore, MemTableSet, RecordIndexEntry, SchemaIndexEntry};
-use xtable_telemetry::metrics::Metrics;
-use xtable_telemetry::timed::Timed;
-use xtable_telemetry::KeyValue;
 use xtable_tx::{CommitEvent, PostCommitHook, TxnCoordinator};
 
 use crate::key::{record_key, schema_key};
 use crate::query::{Query, QueryResult, Record};
 use crate::validation::{validate, JsonSchema, ValidationError};
-
-/// Lazily-initialised `Metrics` bound to the global OTel meter.
-fn metrics() -> &'static Metrics {
-    static METRICS: OnceLock<Metrics> = OnceLock::new();
-    METRICS.get_or_init(Metrics::default)
-}
 
 /// A transaction handle exposed to the structured-layer caller.
 #[derive(Debug, Clone)]
@@ -295,11 +286,6 @@ impl StructuredSpace {
         name: &str,
         body: Value,
     ) -> XtableResult<u32> {
-        let m = metrics();
-        let _timed = Timed::new(
-            &m.txn_commit_duration,
-            vec![KeyValue::new("op", "register")],
-        );
         if !body.is_object() {
             return Err(XtableError::invalid("schema body must be a JSON object"));
         }
@@ -498,10 +484,6 @@ impl StructuredSpace {
         t: &StructuredTxn,
         write: RecordWrite,
     ) -> XtableResult<WriteOutcome> {
-        let _timed = Timed::new(
-            &metrics().txn_commit_duration,
-            vec![KeyValue::new("op", "upsert")],
-        );
         let space = write.space.clone();
         let table = write.table.clone();
         let schema_version =
@@ -593,10 +575,6 @@ impl StructuredSpace {
         table: &str,
         record_id: &str,
     ) -> XtableResult<()> {
-        let _timed = Timed::new(
-            &metrics().txn_commit_duration,
-            vec![KeyValue::new("op", "delete")],
-        );
         let cur = self
             .store
             .get_record_index(space, table, record_id)?
@@ -640,10 +618,6 @@ impl StructuredSpace {
         record_id: &str,
         snapshot: Option<u64>,
     ) -> XtableResult<Option<Record>> {
-        let _timed = Timed::new(
-            &metrics().txn_commit_duration,
-            vec![KeyValue::new("op", "get_record")],
-        );
         let snap = snapshot.unwrap_or(txn.snapshot_version);
         // Per spec §5.2 the structured read path goes through the LSM
         // chunk decode. `read_at_snapshot` walks active memtable →
@@ -691,10 +665,6 @@ impl StructuredSpace {
         query: Query,
         snapshot: Option<u64>,
     ) -> XtableResult<QueryResult> {
-        let _timed = Timed::new(
-            &metrics().txn_commit_duration,
-            vec![KeyValue::new("op", "query")],
-        );
         let snap = snapshot.unwrap_or(txn.snapshot_version);
         let mut records: Vec<Record> = Vec::new();
         for (rid, idx, body) in self.store_iter_with_body(space, table, snap)? {

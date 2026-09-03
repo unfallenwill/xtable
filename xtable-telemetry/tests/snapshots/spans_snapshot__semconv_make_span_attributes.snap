@@ -2,7 +2,7 @@
 source: xtable-telemetry/tests/spans_snapshot.rs
 expression: span
 ---
-name: HTTP
+name: http.server
 fields:
   http.request.body.size: "0"
   http.request.method: GET

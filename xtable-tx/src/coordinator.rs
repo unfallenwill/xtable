@@ -252,6 +252,13 @@ impl TxnCoordinator {
     /// Stage a write within a transaction.
     /// The body is held in-memory here (caller passes bytes) and may spill to
     /// disk if it exceeds the threshold (default 256 KiB).
+    #[tracing::instrument(
+        level = "info",
+        name = "txn.stage",
+        skip_all,
+        fields(txn.id = %txn_id, op = "stage"),
+        err,
+    )]
     pub async fn stage(
         &self,
         txn_id: &str,
@@ -326,6 +333,13 @@ impl TxnCoordinator {
     /// so Cahill cycle detection sees it. Without this, write-skew
     /// scenarios (T1 reads X/Y + writes X; T2 reads X/Y + writes Y)
     /// would commit on both sides and break serializability.
+    #[tracing::instrument(
+        level = "debug",
+        name = "txn.read",
+        skip_all,
+        fields(txn.id = %txn_id, op = "read"),
+        err,
+    )]
     pub async fn read(
         &self,
         txn_id: &str,

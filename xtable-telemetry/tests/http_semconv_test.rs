@@ -5,7 +5,7 @@
 //! running tower `Service` to drive them, which would pull in a full
 //! `tower_http::trace::TraceLayer` harness. Phase 6 wires the full layer
 //! against `xtable-server`'s router; here we only assert that `make_span`
-//! produces a span named `HTTP`.
+//! produces a span named `http.server`.
 
 use axum::http::Request;
 use tower_http::trace::MakeSpan;
@@ -21,5 +21,5 @@ fn make_span_creates_with_required_attrs() {
         .unwrap();
     let span = mk.make_span(&req);
     let ext = span.metadata().map(|m| m.name()).unwrap_or("");
-    assert_eq!(ext, "HTTP");
+    assert_eq!(ext, "http.server");
 }

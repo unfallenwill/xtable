@@ -165,7 +165,9 @@ fn spawn_flush_loop(state: xtable_server::app::AppState) {
     let store = state.store.clone();
     let memtable_set = Arc::clone(state.coordinator.memtable_set());
     tokio::spawn(async move {
-        let _ = flush_loop(memtable_set, store, backend).await;
+        if let Err(err) = flush_loop(memtable_set, store, backend).await {
+            tracing::error!(error = %err, "flush task exited");
+        }
     });
 }
 
@@ -228,7 +230,17 @@ async fn auth_middleware(
         *req.method(),
         axum::http::Method::GET | axum::http::Method::HEAD
     );
-    if let Err(e) = verify_request(&state.auth, &req, is_read) {
+    let anonymous = !req
+        .headers()
+        .contains_key(axum::http::header::AUTHORIZATION);
+    let auth_span = tracing::info_span!(
+        "auth.verify",
+        "http.request.method" = %req.method(),
+        outcome = tracing::field::Empty,
+    );
+    let result = auth_span.in_scope(|| verify_request(&state.auth, &req, is_read));
+    if let Err(e) = result {
+        auth_span.record("outcome", "invalid");
         let status = e.http_status();
         return (
             axum::http::StatusCode::from_u16(status)
@@ -237,5 +249,13 @@ async fn auth_middleware(
         )
             .into_response();
     }
+    auth_span.record(
+        "outcome",
+        if is_read && state.auth.allow_anonymous_read && anonymous {
+            "anonymous_allowed"
+        } else {
+            "valid"
+        },
+    );
     next.run(req).await
 }

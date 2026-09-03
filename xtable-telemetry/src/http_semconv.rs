@@ -5,7 +5,7 @@
 //! attributes required by OTel HTTP semconv v1.27 stable:
 //!
 //! - `http.request.method`
-//! - `http.route`
+//! - `http.route` (the stable, templated route used for metrics)
 //! - `url.path`
 //! - `url.scheme`
 //! - `http.response.status_code` (recorded once the response is known)
@@ -50,7 +50,7 @@ impl<B> MakeSpan<B> for SemConvMakeSpan {
             .map(|m| m.as_str().to_string())
             .unwrap_or_else(|| "unknown".into());
         tracing::info_span!(
-            "HTTP",
+            "http.server",
             "http.request.method" = %req.method(),
             "http.route" = %route,
             "url.path" = %req.uri().path(),
