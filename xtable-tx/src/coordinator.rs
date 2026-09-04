@@ -275,7 +275,7 @@ impl TxnCoordinator {
 
         // Spill body if large.
         let body_handle = if body.len() > 256 * 1024 {
-            let handle = format!("{}-{}", txn_id, uuid_like(&key.as_str()));
+            let handle = format!("{}-{}", txn_id, uuid_like(key.as_str()));
             let path = self.spill_dir.join(&handle);
             tokio::fs::write(&path, &body).await?;
             let sha = sha256_hex(&body);
@@ -592,8 +592,7 @@ impl TxnCoordinator {
                 return Err(XtableError::Conflict(format!(
                     "{}: snapshot {} < chain latest {}",
                     key, txn.snapshot_version, latest
-                ))
-                .into());
+                )));
             }
         }
 

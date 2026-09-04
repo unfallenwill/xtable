@@ -74,40 +74,35 @@ impl Filter {
     pub fn matches(&self, body: &Value) -> bool {
         match self {
             Self::Eq { field, value } => lookup(body, field) == Some(value),
-            Self::Ne { field, value } => lookup(body, field).map_or(true, |v| v != value),
+            Self::Ne { field, value } => lookup(body, field) != Some(value),
             Self::Gt { field, value } => {
-                lookup(body, field).map_or(false, |v| cmp(&v, value) == std::cmp::Ordering::Greater)
+                lookup(body, field).is_some_and(|v| cmp(v, value) == std::cmp::Ordering::Greater)
             }
             Self::Ge { field, value } => matches!(
-                lookup(body, field).map(|v| cmp(&v, value)),
+                lookup(body, field).map(|v| cmp(v, value)),
                 Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
             ),
             Self::Lt { field, value } => {
-                lookup(body, field).map_or(false, |v| cmp(&v, value) == std::cmp::Ordering::Less)
+                lookup(body, field).is_some_and(|v| cmp(v, value) == std::cmp::Ordering::Less)
             }
             Self::Le { field, value } => matches!(
-                lookup(body, field).map(|v| cmp(&v, value)),
+                lookup(body, field).map(|v| cmp(v, value)),
                 Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
             ),
             Self::Contains { field, value } => lookup(body, field)
                 .and_then(|v| v.as_str())
-                .map_or(false, |s| s.contains(value.as_str())),
+                .is_some_and(|s| s.contains(value.as_str())),
             Self::Exists { field } => lookup(body, field).is_some(),
         }
     }
 }
 
 /// Sort direction.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum OrderDir {
+    #[default]
     Asc,
     Desc,
-}
-
-impl Default for OrderDir {
-    fn default() -> Self {
-        Self::Asc
-    }
 }
 
 /// `ORDER BY` clause.

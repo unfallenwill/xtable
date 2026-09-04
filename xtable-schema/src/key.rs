@@ -119,9 +119,6 @@ pub fn parse_record_key(key: &str) -> Option<RecordKeyParts> {
 
 /// True if the key is anything the structured layer manages (schema or record).
 pub fn is_structured_key(key: &str) -> bool {
-    if !key.starts_with(XT_PREFIX) {
-        return false;
-    }
     parse_schema_key(key).is_some() || parse_record_key(key).is_some()
 }
 

@@ -799,7 +799,7 @@ async fn upsert_with_invalid_json_returns_400() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     // Axum rejects malformed JSON → 4xx.
-    assert_eq!(resp.status().is_client_error(), true);
+    assert!(resp.status().is_client_error());
 }
 
 #[tokio::test]

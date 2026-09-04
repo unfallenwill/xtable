@@ -18,10 +18,7 @@ struct MockS3 {
 }
 
 #[derive(Clone, Debug, Default)]
-#[allow(dead_code)]
 struct MultipartState {
-    pub key: String,
-    pub upload_id: String,
     pub parts: Vec<(i32, Vec<u8>)>,
 }
 
@@ -52,23 +49,18 @@ async fn mock_s3_server() -> (String, MockS3) {
         let path = uri.path().to_string();
         // Strip leading slash; split into bucket + key.
         let trimmed = path.trim_start_matches('/');
-        let (bucket, key) = match trimmed.find('/') {
+        let (_, key) = match trimmed.find('/') {
             Some(i) => (&trimmed[..i], &trimmed[i + 1..]),
             None => return (StatusCode::NOT_FOUND, "no key").into_response(),
         };
-        let _ = bucket;
 
         // Initiate multipart: POST {bucket}/{key}?uploads
         if method == Method::POST && params.contains_key("uploads") {
             let upload_id = format!("upload-{}", uuid_like(key));
-            s.multipart.lock().unwrap().insert(
-                upload_id.clone(),
-                MultipartState {
-                    key: key.to_string(),
-                    upload_id: upload_id.clone(),
-                    parts: vec![],
-                },
-            );
+            s.multipart
+                .lock()
+                .unwrap()
+                .insert(upload_id.clone(), MultipartState { parts: vec![] });
             let xml = format!(
                 r#"<?xml version="1.0" encoding="UTF-8"?><InitiateMultipartUploadResult><Bucket>xtable-data</Bucket><Key>{}</Key><UploadId>{}</UploadId></InitiateMultipartUploadResult>"#,
                 key, upload_id
@@ -150,7 +142,7 @@ async fn mock_s3_server() -> (String, MockS3) {
                 // PR-Fix12: include ETag so callers (single PUT and multipart
                 // complete-multipart) see a non-empty etag.
                 let etag = format!("\"mock-etag-{}\"", key);
-                return (StatusCode::OK, [("ETag", etag.as_str())], "").into_response();
+                (StatusCode::OK, [("ETag", etag.as_str())], "").into_response()
             }
             ("DELETE", false) => {
                 s.objects.lock().unwrap().remove(key);

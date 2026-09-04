@@ -121,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&config.server.listen)
         .await
-        .with_context(|| format!("bind {}", &config.server.listen))?;
+        .with_context(|| format!("bind {}", config.server.listen))?;
     info!(addr = ?listener.local_addr(), "listening");
 
     let shutdown_grace = config.server.shutdown_grace_secs;

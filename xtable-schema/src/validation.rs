@@ -29,7 +29,7 @@ pub struct JsonSchema(pub Value);
 
 impl JsonSchema {
     pub fn from_str(s: &str) -> Result<Self, serde_json::Error> {
-        Ok(Self(serde_json::from_str(s)?))
+        serde_json::from_str(s).map(Self)
     }
 
     pub fn as_value(&self) -> &Value {
@@ -82,7 +82,7 @@ pub fn validate_collect(schema: &JsonSchema, value: &Value) -> Vec<ValidationErr
             }
         }
     }
-    if validate(schema, value).is_err() && errs.is_empty() {
+    if errs.is_empty() {
         // Surface the first structural error if no required-property misses.
         if let Err(e) = validate(schema, value) {
             errs.push(e);
@@ -191,11 +191,7 @@ fn validate_object(
     }
     if let Some(ap) = schema.get("additionalProperties") {
         if ap == &Value::Bool(false) {
-            let allowed: std::collections::BTreeSet<&str> = schema
-                .get("properties")
-                .and_then(|v| v.as_object())
-                .map(|o| o.keys().map(|s| s.as_str()).collect())
-                .unwrap_or_default();
+            let allowed = property_names(schema);
             for k in map.keys() {
                 if !allowed.contains(k.as_str()) {
                     return Err(ValidationError {
@@ -205,11 +201,7 @@ fn validate_object(
                 }
             }
         } else if ap.is_object() {
-            let allowed: std::collections::BTreeSet<&str> = schema
-                .get("properties")
-                .and_then(|v| v.as_object())
-                .map(|o| o.keys().map(|s| s.as_str()).collect())
-                .unwrap_or_default();
+            let allowed = property_names(schema);
             for (k, v) in map {
                 if !allowed.contains(k.as_str()) {
                     validate_inner(ap, v, &format!("{path}.{k}"))?;
@@ -220,7 +212,7 @@ fn validate_object(
     Ok(())
 }
 
-fn validate_array(schema: &Value, arr: &Vec<Value>, path: &str) -> Result<(), ValidationError> {
+fn validate_array(schema: &Value, arr: &[Value], path: &str) -> Result<(), ValidationError> {
     if let Some(min) = schema.get("minItems").and_then(|v| v.as_u64()) {
         if (arr.len() as u64) < min {
             return Err(ValidationError {
@@ -264,7 +256,7 @@ fn validate_string(schema: &Value, s: &str, path: &str) -> Result<(), Validation
     }
     if let Some(pat) = schema.get("pattern").and_then(|v| v.as_str()) {
         // Compile on demand; cache statically.
-        let re = compile_pattern(pat).map_err(|e| ValidationError {
+        let re = Regex::new(pat).map_err(|e| ValidationError {
             path: path.to_string(),
             message: format!("bad `pattern` regex: {e}"),
         })?;
@@ -306,8 +298,13 @@ fn validate_number(
     Ok(())
 }
 
-#[allow(dead_code)]
-fn _placeholder_for_collect() {}
+fn property_names(schema: &Value) -> std::collections::BTreeSet<&str> {
+    schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|o| o.keys().map(String::as_str).collect())
+        .unwrap_or_default()
+}
 
 fn json_type(v: &Value) -> String {
     match v {
@@ -331,10 +328,6 @@ fn json_type_label(t: &Value) -> String {
             .join("|"),
         _ => "?".into(),
     }
-}
-
-fn compile_pattern(pat: &str) -> Result<Regex, regex::Error> {
-    Regex::new(pat)
 }
 
 #[cfg(test)]

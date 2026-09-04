@@ -65,10 +65,7 @@ impl StructuredTxn {
     /// is async for trait uniformity; we block_on it here so the read
     /// functions (which are themselves sync) can call this directly.
     pub fn record_read(&self, key: xtable_core::ObjectKey, observed_version: u64) {
-        if self.space.strong_count() == 0 {
-            return;
-        }
-        if self.txn_id == "_admin" {
+        if self.space.strong_count() == 0 || self.txn_id == "_admin" {
             return;
         }
         let space = match self.space.upgrade() {
@@ -125,7 +122,6 @@ struct PendingSchema {
     space: String,
     name: String,
     version: u32,
-    #[allow(dead_code)]
     body: Value,
     backend_key: String,
 }

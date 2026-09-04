@@ -319,7 +319,7 @@ async fn smoke_structured_data_space() {
         &mut app,
         Request::builder()
             .method("GET")
-            .uri(&format!(
+            .uri(format!(
                 "/v1/spaces/acme/tables/tasks/records/after_snap?snapshot={s1}"
             ))
             .body(Body::empty())
@@ -333,7 +333,7 @@ async fn smoke_structured_data_space() {
         &mut app,
         Request::builder()
             .method("GET")
-            .uri(&format!(
+            .uri(format!(
                 "/v1/spaces/acme/tables/tasks/records/after_snap?snapshot={s2}"
             ))
             .body(Body::empty())

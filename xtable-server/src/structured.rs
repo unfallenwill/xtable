@@ -81,8 +81,6 @@ struct RegisterSchemaReq {
     name = "http.schema.register",
     skip_all,
     fields(space = %space, op = "register_schema"),
-
-
 )]
 async fn register_schema(
     State(state): State<Arc<AppState>>,
@@ -123,8 +121,6 @@ struct SchemaQuery {
     name = "http.schema.get",
     skip_all,
     fields(space = %space, name = %name, op = "get_schema"),
-
-
 )]
 async fn get_schema(
     State(state): State<Arc<AppState>>,
@@ -170,8 +166,6 @@ async fn get_schema(
     name = "http.schema.list",
     skip_all,
     fields(space = %space, op = "list_schemas"),
-
-
 )]
 async fn list_schemas(State(state): State<Arc<AppState>>, Path(space): Path<String>) -> Response {
     let txn = match state.structured.begin_txn().await {
@@ -206,8 +200,6 @@ struct BindReq {
     name = "http.table.bind",
     skip_all,
     fields(space = %space, table = %table, op = "bind_table"),
-
-
 )]
 async fn bind_table(
     State(state): State<Arc<AppState>>,
@@ -263,8 +255,6 @@ struct BatchUpsertRecordsResp {
     name = "http.record.upsert",
     skip_all,
     fields(space = %space, table = %table, op = "upsert_record"),
-
-
 )]
 async fn upsert_record(
     State(state): State<Arc<AppState>>,
@@ -386,8 +376,6 @@ struct GetRecordQuery {
         record_id = %record_id,
         op = "get_record"
     ),
-
-
 )]
 async fn get_record(
     State(state): State<Arc<AppState>>,
@@ -436,8 +424,6 @@ async fn get_record(
         record_id = %record_id,
         op = "delete_record"
     ),
-
-
 )]
 async fn delete_record(
     State(state): State<Arc<AppState>>,
@@ -483,8 +469,6 @@ struct QueryParams {
     name = "http.record.query",
     skip_all,
     fields(space = %space, table = %table, op = "query_records"),
-
-
 )]
 async fn query_records(
     State(state): State<Arc<AppState>>,
@@ -613,8 +597,6 @@ struct DiffQuery {
     name = "http.record.diff",
     skip_all,
     fields(space = %space, table = %table, op = "diff_records"),
-
-
 )]
 async fn diff_records(
     State(state): State<Arc<AppState>>,
@@ -861,8 +843,6 @@ async fn abort_structured_txn(
     name = "http.space.snapshot",
     skip_all,
     fields(space = %space, op = "space_snapshot"),
-
-
 )]
 async fn space_snapshot(State(state): State<Arc<AppState>>, Path(space): Path<String>) -> Response {
     let snap = state.store.current_global_version().unwrap_or(0);

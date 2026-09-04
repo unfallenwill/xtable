@@ -37,11 +37,10 @@ pub async fn handler(
 ) -> Response {
     let path = uri.path().to_string();
     let trimmed = path.trim_start_matches('/');
-    let (bucket, key) = match trimmed.find('/') {
+    let (_, key) = match trimmed.find('/') {
         Some(i) => (&trimmed[..i], trimmed[i + 1..].to_string()),
         None => (trimmed, String::new()),
     };
-    let _ = bucket;
 
     // ListObjectsV2: GET /bucket
     if key.is_empty() && method == Method::GET {
@@ -125,7 +124,6 @@ pub async fn handler(
 
     // PutObject
     if method == Method::PUT {
-        eprintln!("DEBUG mock PUT key={} body_len={}", key, body.len());
         let mut meta = HashMap::new();
         for (k, v) in headers.iter() {
             let name = k.as_str().to_ascii_lowercase();
@@ -139,7 +137,6 @@ pub async fn handler(
         // complete-multipart) can verify upload identity. AWS-SDK requires the
         // canonical capitalisation.
         let etag = format!("\"mock-etag-{}\"", key);
-        eprintln!("DEBUG mock PUT returning etag={}", etag);
         return (StatusCode::OK, [("ETag", etag.as_str())], "").into_response();
     }
 
