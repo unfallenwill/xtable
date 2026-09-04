@@ -19,7 +19,7 @@
 //! `commit_version <= snapshot`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -28,15 +28,9 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use xtable_core::XtableResult;
-use xtable_telemetry::metrics::Metrics;
+use xtable_telemetry::metrics::global as metrics;
 use xtable_telemetry::timed::Timed;
 use xtable_telemetry::KeyValue;
-
-/// Lazily-initialised `Metrics` bound to the global OTel meter.
-fn metrics() -> &'static Metrics {
-    static METRICS: OnceLock<Metrics> = OnceLock::new();
-    METRICS.get_or_init(Metrics::default)
-}
 
 /// Composite record key: `(space, table, record_id)`.
 pub type RecordKey = (String, String, String);

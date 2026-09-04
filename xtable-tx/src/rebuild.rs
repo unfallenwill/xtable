@@ -33,7 +33,6 @@
 //! subsequent commits overwrite real data at v1+.
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
 
 use chrono::Utc;
 use tracing::{info, warn};
@@ -43,15 +42,9 @@ use xtable_storage::{
     chunk::{decode_body_entries, decompress_body, ChunkEntry, ChunkHeader, ChunkIndexEntry},
     LocalStore, RecordIndexEntry, VersionEntry, VersionRecord,
 };
-use xtable_telemetry::metrics::Metrics;
+use xtable_telemetry::metrics::global as metrics;
 use xtable_telemetry::timed::Timed;
 use xtable_telemetry::KeyValue;
-
-/// Lazily-initialised `Metrics` bound to the global OTel meter.
-fn metrics() -> &'static Metrics {
-    static METRICS: OnceLock<Metrics> = OnceLock::new();
-    METRICS.get_or_init(Metrics::default)
-}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RebuildReport {
@@ -141,8 +134,10 @@ pub async fn rebuild(
         ))
     })?;
 
-    let mut report = RebuildReport::default();
-    report.objects_scanned = objects.len();
+    let mut report = RebuildReport {
+        objects_scanned: objects.len(),
+        ..RebuildReport::default()
+    };
 
     // Per-chunk bookkeeping for TBL_CHUNK_INDEX. Keyed by chunk_id
     // because `TBL_CHUNK_INDEX` is chunk_id → ChunkIndexEntry.

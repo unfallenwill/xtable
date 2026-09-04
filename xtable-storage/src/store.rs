@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use redb::{Database, ReadableTable};
 
@@ -34,15 +34,9 @@ use crate::version_index::VersionRecord;
 use crate::wal::WalRecord;
 use xtable_core::headers::TxnStatus;
 use xtable_core::{ObjectKey, XtableError, XtableResult};
-use xtable_telemetry::metrics::Metrics;
+use xtable_telemetry::metrics::global as metrics;
 use xtable_telemetry::timed::Timed;
 use xtable_telemetry::KeyValue;
-
-/// Lazily-initialised `Metrics` bound to the global OTel meter.
-fn metrics() -> &'static Metrics {
-    static METRICS: OnceLock<Metrics> = OnceLock::new();
-    METRICS.get_or_init(Metrics::default)
-}
 
 pub(crate) fn redb_err<E: std::fmt::Display>(e: E) -> XtableError {
     XtableError::Storage(e.to_string())

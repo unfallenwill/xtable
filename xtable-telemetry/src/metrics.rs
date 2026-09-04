@@ -13,6 +13,13 @@
 //! (`process.runtime.*`) instruments round out the §6.2 / §6.3 surface.
 
 use opentelemetry::metrics::{Counter, Histogram, Meter, UpDownCounter};
+use std::sync::OnceLock;
+
+/// Lazily initialized metrics bound to the process-wide global meter.
+pub fn global() -> &'static Metrics {
+    static METRICS: OnceLock<Metrics> = OnceLock::new();
+    METRICS.get_or_init(Metrics::default)
+}
 
 /// Pre-built OTel metric instruments.
 ///

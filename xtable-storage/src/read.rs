@@ -16,21 +16,14 @@
 //! Range-GET support lands in PR #4+ via `BackendClient::get_object_range`.
 
 use std::sync::Arc;
-use std::sync::OnceLock;
 
 use crate::chunk::{bloom_may_contain, decode_body_entries, decompress_body, ChunkIndexEntry};
 use crate::memtable::{MemTableSet, RecordKey};
 use crate::store::LocalStore;
 use xtable_core::{ObjectKey, XtableResult};
-use xtable_telemetry::metrics::Metrics;
+use xtable_telemetry::metrics::global as metrics;
 use xtable_telemetry::timed::Timed;
 use xtable_telemetry::KeyValue;
-
-/// Lazily-initialised `Metrics` bound to the global OTel meter.
-fn metrics() -> &'static Metrics {
-    static METRICS: OnceLock<Metrics> = OnceLock::new();
-    METRICS.get_or_init(Metrics::default)
-}
 
 /// Outcome of a read at a snapshot.
 #[derive(Clone)]

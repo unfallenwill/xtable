@@ -19,7 +19,7 @@
 //!    WAL `Aborted`, return 409 / 503.
 
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -32,7 +32,7 @@ use xtable_storage::{
     BlobRecord, LocalStore, MemEntry, MemTableSet, RecordValue, TxnStateRecord, VersionRecord,
     WalRecord, WriteSetEntry,
 };
-use xtable_telemetry::metrics::Metrics;
+use xtable_telemetry::metrics::global as metrics;
 use xtable_telemetry::timed::Timed;
 use xtable_telemetry::KeyValue;
 
@@ -69,16 +69,6 @@ pub struct CommitEvent {
 /// (the chain is already published). Implementation MUST be fast and
 /// non-blocking on IO.
 pub type PostCommitHook = Arc<dyn Fn(&CommitEvent) + Send + Sync>;
-
-/// Lazily-initialised `Metrics` handles bound to the process-wide global
-/// `Meter`. Constructed on first access; subsequent calls reuse the same
-/// instruments. `xtable-telemetry::init()` must have been called before
-/// the first metric is recorded in production, otherwise the recordings
-/// go to the no-op default OTel provider.
-fn metrics() -> &'static Metrics {
-    static METRICS: OnceLock<Metrics> = OnceLock::new();
-    METRICS.get_or_init(Metrics::default)
-}
 
 /// Transaction coordinator.
 #[derive(Clone)]

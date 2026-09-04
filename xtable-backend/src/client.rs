@@ -3,7 +3,7 @@
 use crate::mock;
 use crate::mock::MockS3;
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use aws_config::BehaviorVersion;
@@ -15,15 +15,9 @@ use aws_sdk_s3::Client;
 use crate::error::{BackendError, BackendResult};
 use crate::keymap::{IdentityKeyMap, KeyMap};
 use xtable_core::ObjectKey;
-use xtable_telemetry::metrics::Metrics;
+use xtable_telemetry::metrics::global as metrics;
 use xtable_telemetry::timed::Timed;
 use xtable_telemetry::KeyValue;
-
-/// Lazily-initialised `Metrics` bound to the global OTel meter.
-fn metrics() -> &'static Metrics {
-    static METRICS: OnceLock<Metrics> = OnceLock::new();
-    METRICS.get_or_init(Metrics::default)
-}
 
 /// Convenience: convert an `aws_sdk_s3::error::SdkError` to `BackendError`.
 fn map_sdk_err<E, R>(e: aws_sdk_s3::error::SdkError<E, R>) -> BackendError

@@ -48,19 +48,12 @@
 
 use bytes::BytesMut;
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
 use xxhash_rust::xxh3;
 
 use xtable_core::XtableResult;
-use xtable_telemetry::metrics::Metrics;
+use xtable_telemetry::metrics::global as metrics;
 use xtable_telemetry::timed::Timed;
 use xtable_telemetry::KeyValue;
-
-/// Lazily-initialised `Metrics` bound to the global OTel meter.
-fn metrics() -> &'static Metrics {
-    static METRICS: OnceLock<Metrics> = OnceLock::new();
-    METRICS.get_or_init(Metrics::default)
-}
 
 /// Magic bytes for chunk files.
 pub const CHUNK_MAGIC: &[u8; 4] = b"XTC1";

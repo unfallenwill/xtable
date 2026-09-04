@@ -173,8 +173,8 @@ pub fn init(cfg: &TelemetryConfig) -> anyhow::Result<Option<TelemetryGuard>> {
 
     // Install the live `SdkMeterProvider` as the process-wide meter
     // provider. Without this, `Metrics::default()` (used by
-    // `OnceLock<Metrics>` in xtable-tx, xtable-storage, xtable-backend,
-    // xtable-schema) and the `Metrics::new(&global::meter("xtable"))`
+    // the shared global metrics cache) and the
+    // `Metrics::new(&global::meter("xtable"))`
     // call in xtable-server main bind their instruments to whatever
     // global provider existed at first call — the no-op default —
     // and every recording is silently dropped. Mirrors the
